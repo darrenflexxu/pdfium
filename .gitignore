@@ -1,0 +1,60 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+*.o
+*.obj
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.ncb
+*.suo
+*.user
+*.sln
+*.vcxproj*
+*.vcproj*
+*.vs/
+
+# Qt
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qm
+*.rcc
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.cmake
+!CMakeLists.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PDFium binaries (downloaded separately)
+third_party/pdfium/bin/*.dll
+third_party/pdfium/lib/*.lib
+third_party/pdfium/include/
+!third_party/pdfium/include/.gitkeep
+
+# Distribution
+*.zip
+*.tar.gz
+*.7z
+
+# Logs
+*.log
