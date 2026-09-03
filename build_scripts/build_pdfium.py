@@ -110,23 +110,45 @@ class PDFiumBuilder:
         return env
 
     def run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, env: Optional[dict] = None) -> Tuple[int, str, str]:
-        """Run command with logging"""
+        """Run command with real-time output streaming"""
         log_info(f"Running: {' '.join(cmd)}")
         try:
-            result = subprocess.run(
-                cmd, 
+            proc = subprocess.Popen(
+                cmd,
                 cwd=cwd or self.pdfium_dir,
-                capture_output=True, 
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 env=env or self.setup_environment(),
-                timeout=3600  # 1 hour timeout
+                bufsize=1,
             )
-            if result.stdout:
-                print(result.stdout)
-            if result.stderr:
-                print(result.stderr)
-            return result.returncode, result.stdout, result.stderr
+            stdout_lines = []
+            stderr_lines = []
+            
+            def read_stream(stream, lines_list, prefix=""):
+                for line in iter(stream.readline, ''):
+                    if line:
+                        line = line.rstrip('\n')
+                        lines_list.append(line)
+                        if prefix:
+                            print(f"{prefix}{line}")
+                        else:
+                            print(line)
+                stream.close()
+            
+            import threading
+            stdout_thread = threading.Thread(target=read_stream, args=(proc.stdout, stdout_lines, ""))
+            stderr_thread = threading.Thread(target=read_stream, args=(proc.stderr, stderr_lines, "[STDERR] "))
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            proc.wait(timeout=3600)
+            stdout_thread.join()
+            stderr_thread.join()
+            
+            return proc.returncode, "\n".join(stdout_lines), "\n".join(stderr_lines)
         except subprocess.TimeoutExpired:
+            proc.kill()
             return -1, "", "Command timed out after 1 hour"
         except Exception as e:
             return -1, "", str(e)

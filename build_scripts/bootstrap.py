@@ -12,6 +12,7 @@ import shutil
 import urllib.request
 import zipfile
 import tarfile
+import threading
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -43,16 +44,41 @@ class BootstrapManager:
         self.machine = platform.machine().lower()
         
     def run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, env: Optional[dict] = None) -> Tuple[int, str, str]:
-        """Run command and return (returncode, stdout, stderr)"""
+        """Run command with real-time output streaming"""
         try:
-            result = subprocess.run(
-                cmd, 
+            proc = subprocess.Popen(
+                cmd,
                 cwd=cwd or self.repo_root,
-                capture_output=True, 
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                env=env or os.environ
+                env=env or os.environ,
+                bufsize=1,
             )
-            return result.returncode, result.stdout, result.stderr
+            stdout_lines = []
+            stderr_lines = []
+            
+            def read_stream(stream, lines_list, prefix=""):
+                for line in iter(stream.readline, ''):
+                    if line:
+                        line = line.rstrip('\n')
+                        lines_list.append(line)
+                        if prefix:
+                            print(f"{prefix}{line}")
+                        else:
+                            print(line)
+                stream.close()
+            
+            stdout_thread = threading.Thread(target=read_stream, args=(proc.stdout, stdout_lines, ""))
+            stderr_thread = threading.Thread(target=read_stream, args=(proc.stderr, stderr_lines, "[STDERR] "))
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            proc.wait()
+            stdout_thread.join()
+            stderr_thread.join()
+            
+            return proc.returncode, "\n".join(stdout_lines), "\n".join(stderr_lines)
         except Exception as e:
             return -1, "", str(e)
 
