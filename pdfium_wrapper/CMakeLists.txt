@@ -23,13 +23,12 @@ target_compile_definitions(pdfium_wrapper
         PDF_ENABLE_V8=0
 )
 
-# Link against PDFium
-target_link_libraries(pdfium_wrapper PRIVATE
-    ${PDFIUM_ROOT}/bin/pdfium.lib
-)
-
-# Windows-specific: Export symbols
+# Link against PDFium - cross-platform
 if(WIN32)
+    target_link_libraries(pdfium_wrapper PRIVATE
+        ${PDFIUM_ROOT}/lib/pdfium.lib
+    )
+    # Windows-specific: Export symbols
     target_link_libraries(pdfium_wrapper PRIVATE
         delayimp
     )
@@ -38,17 +37,57 @@ if(WIN32)
         SOVERSION ${PROJECT_VERSION_MAJOR}
         VERSION ${PROJECT_VERSION}
     )
+elseif(APPLE)
+    target_link_libraries(pdfium_wrapper PRIVATE
+        ${PDFIUM_ROOT}/lib/libpdfium.dylib
+    )
+    set_target_properties(pdfium_wrapper PROPERTIES
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+        VERSION ${PROJECT_VERSION}
+        MACOSX_RPATH ON
+        INSTALL_NAME_DIR "@rpath"
+    )
+else()
+    target_link_libraries(pdfium_wrapper PRIVATE
+        ${PDFIUM_ROOT}/lib/libpdfium.so
+    )
+    set_target_properties(pdfium_wrapper PROPERTIES
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+        VERSION ${PROJECT_VERSION}
+        POSITION_INDEPENDENT_CODE ON
+    )
+endif()
+
+# Depend on PDFium build if building from source
+if(BUILD_PDFIUM_FROM_SOURCE)
+    add_dependencies(pdfium_wrapper pdfium_build)
 endif()
 
 # ------------------------------------------------------------
-# Copy PDFium DLL to build output for runtime
+# Copy PDFium runtime library to build output
 # ------------------------------------------------------------
-add_custom_command(TARGET pdfium_wrapper POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${PDFIUM_ROOT}/bin/pdfium.dll"
-        $<TARGET_FILE_DIR:pdfium_wrapper>
-    COMMENT "Copying pdfium.dll to wrapper output directory"
-)
+if(WIN32)
+    add_custom_command(TARGET pdfium_wrapper POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PDFIUM_ROOT}/bin/pdfium.dll"
+            $<TARGET_FILE_DIR:pdfium_wrapper>
+        COMMENT "Copying pdfium.dll to wrapper output directory"
+    )
+elseif(APPLE)
+    add_custom_command(TARGET pdfium_wrapper POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PDFIUM_ROOT}/bin/libpdfium.dylib"
+            $<TARGET_FILE_DIR:pdfium_wrapper>
+        COMMENT "Copying libpdfium.dylib to wrapper output directory"
+    )
+else()
+    add_custom_command(TARGET pdfium_wrapper POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PDFIUM_ROOT}/bin/libpdfium.so"
+            $<TARGET_FILE_DIR:pdfium_wrapper>
+        COMMENT "Copying libpdfium.so to wrapper output directory"
+    )
+endif()
 
 # ------------------------------------------------------------
 # Install Headers

@@ -15,6 +15,7 @@ public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     
     void setDocument(PdfDocument* document);
+    PdfDocument* document() const { return m_document; }
     void setPage(int pageIndex);
     void setZoom(qreal zoom);
     void setRotation(int rotation);

@@ -471,3 +471,355 @@ PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DeviceToPage(
     *page_x = pg_x;
     *page_y = pg_y;
 }
+
+// ============================================================
+// PDF Compression / Optimization API
+// ============================================================
+
+// Forward declarations for extension functions
+// These would be available if PDFium was built with our extensions
+#ifdef FPDF_OptimizeDocument
+extern "C" {
+    void FPDF_CompressOptionsInit(void* options);
+    int FPDF_OptimizeDocument(void* doc, const void* options, void** out_doc);
+    int FPDF_SaveWithCompression(void* doc, const char* path, const void* options);
+    int FPDF_GetLastCompressStats(void* stats);
+}
+#endif
+
+PDFWRAPPER_API void PDFWRAPPER_CALL PDF_CompressOptionsInit(PDF_CompressOptions* options) {
+    if (!options) return;
+    #ifdef FPDF_OptimizeDocument
+    FPDF_CompressOptionsInit(options);
+    #else
+    memset(options, 0, sizeof(PDF_CompressOptions));
+    options->flags = PDF_COMPRESS_DEFAULT;
+    options->image_quality = PDF_IMAGE_QUALITY_HIGH;
+    options->image_dpi_threshold = 300;
+    options->min_image_dpi = 150;
+    options->font_subset_threshold = 80;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_OptimizeDocument(
+    PDF_DocHandle handle,
+    const PDF_CompressOptions* options,
+    PDF_DocHandle* out_handle
+) {
+    if (!handle || !out_handle) return PDF_ERR_INVALID_PARAM;
+    
+    #ifdef FPDF_OptimizeDocument
+    PDF_Document* doc = static_cast<PDF_Document*>(handle);
+    FPDF_DOCUMENT new_doc = nullptr;
+    int result = FPDF_OptimizeDocument(doc->doc, options, &new_doc);
+    if (result && new_doc) {
+        PDF_Document* wrapper = new PDF_Document();
+        wrapper->doc = new_doc;
+        *out_handle = wrapper;
+        return PDF_OK;
+    }
+    return PDF_ERR_UNSUPPORTED;
+    #else
+    (void)options;
+    return PDF_ERR_UNSUPPORTED;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SaveWithCompression(
+    PDF_DocHandle handle,
+    const char* file_path,
+    const PDF_CompressOptions* options
+) {
+    if (!handle || !file_path) return PDF_ERR_INVALID_PARAM;
+    
+    #ifdef FPDF_OptimizeDocument
+    PDF_Document* doc = static_cast<PDF_Document*>(handle);
+    return FPDF_SaveWithCompression(doc->doc, file_path, options) ? PDF_OK : PDF_ERR_UNKNOWN;
+    #else
+    (void)options;
+    return PDF_ERR_UNSUPPORTED;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetLastCompressStats(PDF_CompressStats* stats) {
+    if (!stats) return PDF_ERR_INVALID_PARAM;
+    
+    #ifdef FPDF_OptimizeDocument
+    return FPDF_GetLastCompressStats(stats) ? PDF_OK : PDF_ERR_UNKNOWN;
+    #else
+    memset(stats, 0, sizeof(PDF_CompressStats));
+    return PDF_ERR_UNSUPPORTED;
+    #endif
+}
+
+// ============================================================
+// Element Extraction API
+// ============================================================
+
+// Forward declarations for extension functions
+#ifdef FPDF_CreateElementIterator
+extern "C" {
+    void* FPDF_CreateElementIterator(void* page);
+    void* FPDF_GetNextElement(void* iterator);
+    void FPDF_DestroyElementIterator(void* iterator);
+    int FPDF_GetElementType(void* element);
+    void FPDF_GetElementBounds(void* element, double* bounds);
+    int FPDF_GetElementTextAttributes(void* element, void* attrs);
+    int FPDF_GetElementImageAttributes(void* element, void* attrs);
+    int FPDF_GetElementPathAttributes(void* element, void* attrs);
+    const char* FPDF_GetElementText(void* element, int* out_len);
+    unsigned char* FPDF_GetElementImageData(void* element, size_t* out_size);
+    unsigned char* FPDF_GetElementPathData(void* element, size_t* out_size);
+    void FPDF_FreeElementData(void* data);
+    int FPDF_CountPageElements(void* page);
+    void* FPDF_GetPageElement(void* page, int index);
+    int FPDF_FindElementsByType(void* page, int type, void** out_elements, int max_count);
+    int FPDF_SearchTextEx(void* page, const char* text, int flags, int start, int max, void* matches, int* count);
+    int FPDF_ExtractFormFields(void* doc, void* fields, int max);
+    int FPDF_ExtractAnnotations(void* page, void* annots, int max);
+    int FPDF_ExtractBookmarks(void* doc, void* bookmarks, int max);
+    int FPDF_GetDocumentStructure(void* doc, void* info);
+}
+#endif
+
+PDFWRAPPER_API PDF_ElementIteratorHandle PDFWRAPPER_CALL PDF_CreateElementIterator(PDF_PageHandle page) {
+    if (!page) return nullptr;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_CreateElementIterator(wrapper->page);
+    #else
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API PDF_ElementHandle PDFWRAPPER_CALL PDF_GetNextElement(PDF_ElementIteratorHandle iterator) {
+    if (!iterator) return nullptr;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetNextElement(iterator);
+    #else
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DestroyElementIterator(PDF_ElementIteratorHandle iterator) {
+    if (!iterator) return;
+    
+    #ifdef FPDF_CreateElementIterator
+    FPDF_DestroyElementIterator(iterator);
+    #endif
+}
+
+PDFWRAPPER_API PDF_ElementType PDFWRAPPER_CALL PDF_GetElementType(PDF_ElementHandle element) {
+    if (!element) return PDF_ELEMENT_UNKNOWN;
+    
+    #ifdef FPDF_CreateElementIterator
+    return static_cast<PDF_ElementType>(FPDF_GetElementType(element));
+    #else
+    return PDF_ELEMENT_UNKNOWN;
+    #endif
+}
+
+PDFWRAPPER_API void PDFWRAPPER_CALL PDF_GetElementBounds(PDF_ElementHandle element, double* bounds) {
+    if (!element || !bounds) return;
+    
+    #ifdef FPDF_CreateElementIterator
+    FPDF_GetElementBounds(element, bounds);
+    #else
+    bounds[0] = bounds[1] = bounds[2] = bounds[3] = 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementTextAttributes(PDF_ElementHandle element, PDF_TextAttributes* out_attr) {
+    if (!element || !out_attr) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementTextAttributes(element, out_attr);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementImageAttributes(PDF_ElementHandle element, PDF_ImageAttributes* out_attr) {
+    if (!element || !out_attr) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementImageAttributes(element, out_attr);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementPathAttributes(PDF_ElementHandle element, PDF_PathAttributes* out_attr) {
+    if (!element || !out_attr) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementPathAttributes(element, out_attr);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API const char* PDFWRAPPER_CALL PDF_GetElementText(PDF_ElementHandle element, int* out_length) {
+    if (!element) {
+        if (out_length) *out_length = 0;
+        return nullptr;
+    }
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementText(element, out_length);
+    #else
+    if (out_length) *out_length = 0;
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API unsigned char* PDFWRAPPER_CALL PDF_GetElementImageData(PDF_ElementHandle element, size_t* out_size) {
+    if (!element || !out_size) return nullptr;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementImageData(element, out_size);
+    #else
+    *out_size = 0;
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API unsigned char* PDFWRAPPER_CALL PDF_GetElementPathData(PDF_ElementHandle element, size_t* out_size) {
+    if (!element || !out_size) return nullptr;
+    
+    #ifdef FPDF_CreateElementIterator
+    return FPDF_GetElementPathData(element, out_size);
+    #else
+    *out_size = 0;
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API void PDFWRAPPER_CALL PDF_FreeElementData(void* data) {
+    if (!data) return;
+    
+    #ifdef FPDF_CreateElementIterator
+    FPDF_FreeElementData(data);
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_CountPageElements(PDF_PageHandle page) {
+    if (!page) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_CountPageElements(wrapper->page);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API PDF_ElementHandle PDFWRAPPER_CALL PDF_GetPageElement(PDF_PageHandle page, int index) {
+    if (!page || index < 0) return nullptr;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_GetPageElement(wrapper->page, index);
+    #else
+    return nullptr;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_FindElementsByType(
+    PDF_PageHandle page,
+    PDF_ElementType type,
+    PDF_ElementHandle* out_elements,
+    int max_count
+) {
+    if (!page || !out_elements || max_count <= 0) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_FindElementsByType(wrapper->page, static_cast<int>(type), 
+                                    reinterpret_cast<void**>(out_elements), max_count);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SearchTextEx(
+    PDF_PageHandle page,
+    const char* search_text,
+    int flags,
+    int start_index,
+    int max_results,
+    PDF_TextMatchEx* out_matches,
+    int* out_count
+) {
+    if (!page || !search_text || !out_matches || !out_count) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_SearchTextEx(wrapper->page, search_text, flags, start_index, max_results,
+                             reinterpret_cast<void*>(out_matches), out_count);
+    #else
+    *out_count = 0;
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractFormFields(
+    PDF_DocHandle handle,
+    PDF_FormFieldInfo* out_fields,
+    int max_fields
+) {
+    if (!handle || !out_fields || max_fields <= 0) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Document* doc = static_cast<PDF_Document*>(handle);
+    return FPDF_ExtractFormFields(doc->doc, out_fields, max_fields);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractAnnotations(
+    PDF_PageHandle page,
+    PDF_AnnotInfo* out_annots,
+    int max_annots
+) {
+    if (!page || !out_annots || max_annots <= 0) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
+    return FPDF_ExtractAnnotations(wrapper->page, out_annots, max_annots);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractBookmarks(
+    PDF_DocHandle handle,
+    PDF_BookmarkInfo* out_bookmarks,
+    int max_bookmarks
+) {
+    if (!handle || !out_bookmarks || max_bookmarks <= 0) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Document* doc = static_cast<PDF_Document*>(handle);
+    return FPDF_ExtractBookmarks(doc->doc, out_bookmarks, max_bookmarks);
+    #else
+    return 0;
+    #endif
+}
+
+PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetDocumentStructure(
+    PDF_DocHandle handle,
+    PDF_DocumentStructure* out_info
+) {
+    if (!handle || !out_info) return 0;
+    
+    #ifdef FPDF_CreateElementIterator
+    PDF_Document* doc = static_cast<PDF_Document*>(handle);
+    return FPDF_GetDocumentStructure(doc->doc, out_info);
+    #else
+    return 0;
+    #endif
+}
