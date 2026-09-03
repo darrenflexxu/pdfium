@@ -13,7 +13,7 @@ target_include_directories(pdfium_wrapper
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${PDFIUM_ROOT}/include
+        # PDFium headers are brought in via the pdfium INTERFACE target
 )
 
 target_compile_definitions(pdfium_wrapper
@@ -23,12 +23,12 @@ target_compile_definitions(pdfium_wrapper
         PDF_ENABLE_V8=0
 )
 
-# Link against PDFium - cross-platform
+# Link against PDFium INTERFACE library
+# This pulls in include directories and link libraries from the pdfium target
+target_link_libraries(pdfium_wrapper PRIVATE pdfium)
+
+# Platform-specific link options
 if(WIN32)
-    target_link_libraries(pdfium_wrapper PRIVATE
-        ${PDFIUM_ROOT}/lib/pdfium.lib
-    )
-    # Windows-specific: Export symbols
     target_link_libraries(pdfium_wrapper PRIVATE
         delayimp
     )
@@ -38,9 +38,6 @@ if(WIN32)
         VERSION ${PROJECT_VERSION}
     )
 elseif(APPLE)
-    target_link_libraries(pdfium_wrapper PRIVATE
-        ${PDFIUM_ROOT}/lib/libpdfium.dylib
-    )
     set_target_properties(pdfium_wrapper PROPERTIES
         SOVERSION ${PROJECT_VERSION_MAJOR}
         VERSION ${PROJECT_VERSION}
@@ -48,9 +45,6 @@ elseif(APPLE)
         INSTALL_NAME_DIR "@rpath"
     )
 else()
-    target_link_libraries(pdfium_wrapper PRIVATE
-        ${PDFIUM_ROOT}/lib/libpdfium.so
-    )
     set_target_properties(pdfium_wrapper PROPERTIES
         SOVERSION ${PROJECT_VERSION_MAJOR}
         VERSION ${PROJECT_VERSION}
@@ -58,32 +52,32 @@ else()
     )
 endif()
 
-# Depend on PDFium build if building from source
-if(BUILD_PDFIUM_FROM_SOURCE)
-    add_dependencies(pdfium_wrapper pdfium_build)
-endif()
+# The pdfium INTERFACE target already depends on pdfium_build (when BUILD_PDFIUM_FROM_SOURCE=ON)
+# so pdfium_wrapper automatically gets the correct build order.
 
 # ------------------------------------------------------------
 # Copy PDFium runtime library to build output
 # ------------------------------------------------------------
+# The runtime DLLs are copied by the pdfium_build target's post-processing
+# But we also ensure they're copied to the wrapper output directory
 if(WIN32)
     add_custom_command(TARGET pdfium_wrapper POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PDFIUM_ROOT}/bin/pdfium.dll"
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll"
             $<TARGET_FILE_DIR:pdfium_wrapper>
         COMMENT "Copying pdfium.dll to wrapper output directory"
     )
 elseif(APPLE)
     add_custom_command(TARGET pdfium_wrapper POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PDFIUM_ROOT}/bin/libpdfium.dylib"
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.dylib"
             $<TARGET_FILE_DIR:pdfium_wrapper>
         COMMENT "Copying libpdfium.dylib to wrapper output directory"
     )
 else()
     add_custom_command(TARGET pdfium_wrapper POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PDFIUM_ROOT}/bin/libpdfium.so"
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.so"
             $<TARGET_FILE_DIR:pdfium_wrapper>
         COMMENT "Copying libpdfium.so to wrapper output directory"
     )

@@ -18,7 +18,6 @@ endif()
 # ------------------------------------------------------------
 # PDFium Build Pipeline Integration
 # ------------------------------------------------------------
-# Option to build PDFium from source
 option(BUILD_PDFIUM_FROM_SOURCE "Build PDFium from source using GN/Ninja" OFF)
 option(PDFIUM_BUILD_DEBUG "Build PDFium in debug mode" OFF)
 option(PDFIUM_ENABLE_XFA "Enable XFA support in PDFium" ON)
@@ -74,6 +73,27 @@ if(PDFIUM_TARGET_CPU STREQUAL "")
 endif()
 
 # ------------------------------------------------------------
+# PDFium Dependency: INTERFACE Library (Lazy/Forward Declaration)
+# This target exists at configure time but gets populated at build time
+# ------------------------------------------------------------
+add_library(pdfium INTERFACE)
+
+# Common include directory (will exist after pdfium_build)
+target_include_directories(pdfium
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/include>
+)
+
+# Platform-specific link libraries (resolved at build time)
+if(WIN32)
+    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium.lib)
+elseif(APPLE)
+    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.dylib)
+else()
+    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.so)
+endif()
+
+# ------------------------------------------------------------
 # PDFium External Project (build from source)
 # ------------------------------------------------------------
 if(BUILD_PDFIUM_FROM_SOURCE)
@@ -105,44 +125,16 @@ if(BUILD_PDFIUM_FROM_SOURCE)
         VERBATIM
     )
     
-    # Make pdfium_wrapper depend on pdfium_build
-    set(PDFIUM_LIB_DEPENDS pdfium_build)
+    # The pdfium INTERFACE library depends on pdfium_build being complete
+    # This ensures headers/libs exist before anything links against pdfium
+    add_dependencies(pdfium pdfium_build)
+    
 else()
     message(STATUS "PDFium: Using pre-built binaries from ${PDFIUM_SOURCE_DIR}")
-    set(PDFIUM_LIB_DEPENDS)
-endif()
-
-# ------------------------------------------------------------
-# PDFium Dependency Configuration
-# ------------------------------------------------------------
-# Expects the following structure in third_party/pdfium/:
-#   include/     -> fpdfview.h, fpdf_edit.h, etc.
-#   bin/         -> pdfium.dll / libpdfium.dylib / libpdfium.so
-#   lib/         -> pdfium.lib / libpdfium.a
-set(PDFIUM_ROOT "${CMAKE_SOURCE_DIR}/third_party/pdfium" CACHE PATH "Path to PDFium SDK")
-
-# Verify PDFium installation
-if(NOT EXISTS "${PDFIUM_ROOT}/include/fpdfview.h")
-    if(BUILD_PDFIUM_FROM_SOURCE)
-        message(WARNING "PDFium headers not found. Run 'cmake --build . --target pdfium_build' first.")
-    else()
-        message(WARNING "PDFium headers not found at ${PDFIUM_ROOT}/include/. Build will fail.")
+    # If using pre-built, warn if not found but don't fail configure
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/pdfium/include/fpdfview.h")
+        message(WARNING "Pre-built PDFium headers not found at third_party/pdfium/include/. Build may fail.")
     endif()
-endif()
-
-# Find PDFium library
-if(WIN32)
-    set(PDFIUM_LIBRARY_NAME "pdfium")
-    set(PDFIUM_LIBRARY_PATH "${PDFIUM_ROOT}/lib/pdfium.lib")
-    set(PDFIUM_DLL_PATH "${PDFIUM_ROOT}/bin/pdfium.dll")
-elseif(APPLE)
-    set(PDFIUM_LIBRARY_NAME "pdfium")
-    set(PDFIUM_LIBRARY_PATH "${PDFIUM_ROOT}/lib/libpdfium.dylib")
-    set(PDFIUM_DLL_PATH "${PDFIUM_ROOT}/bin/libpdfium.dylib")
-else()
-    set(PDFIUM_LIBRARY_NAME "pdfium")
-    set(PDFIUM_LIBRARY_PATH "${PDFIUM_ROOT}/lib/libpdfium.so")
-    set(PDFIUM_DLL_PATH "${PDFIUM_ROOT}/bin/libpdfium.so")
 endif()
 
 # ------------------------------------------------------------

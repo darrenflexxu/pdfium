@@ -43,19 +43,42 @@ target_include_directories(pdf_reader PRIVATE
 # ------------------------------------------------------------
 # Copy DLLs to executable directory for debugging
 # ------------------------------------------------------------
-add_custom_command(TARGET pdf_reader POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:pdfium_wrapper>"
-        "$<TARGET_FILE_DIR:pdf_reader>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${PDFIUM_ROOT}/bin/pdfium.dll"
-        "$<TARGET_FILE_DIR:pdf_reader>"
-    COMMENT "Copying runtime DLLs to executable directory"
-)
+# Cross-platform copy of runtime libraries
+if(WIN32)
+    add_custom_command(TARGET pdf_reader POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:pdfium_wrapper>"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMENT "Copying runtime DLLs to executable directory"
+    )
+elseif(APPLE)
+    add_custom_command(TARGET pdf_reader POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:pdfium_wrapper>"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.dylib"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMENT "Copying runtime libraries to executable directory"
+    )
+else()
+    add_custom_command(TARGET pdf_reader POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:pdfium_wrapper>"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.so"
+            "$<TARGET_FILE_DIR:pdf_reader>"
+        COMMENT "Copying runtime libraries to executable directory"
+    )
+endif()
 
 # ------------------------------------------------------------
 # Windows: Set subsystem to windows (no console)
-// ------------------------------------------------------------
+# ------------------------------------------------------------
 if(WIN32)
     set_target_properties(pdf_reader PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:WINDOWS"
@@ -63,8 +86,8 @@ if(WIN32)
 endif()
 
 # ------------------------------------------------------------
-// Install
-// ------------------------------------------------------------
+# Install
+# ------------------------------------------------------------
 install(TARGETS pdf_reader
     RUNTIME DESTINATION bin
 )
