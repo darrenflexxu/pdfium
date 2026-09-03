@@ -58,3 +58,4 @@ third_party/pdfium/include/
 
 # Logs
 *.log
+.*

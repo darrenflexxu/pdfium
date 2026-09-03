@@ -99,8 +99,14 @@ endif()
 if(BUILD_PDFIUM_FROM_SOURCE)
     message(STATUS "PDFium: Building from source (${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU})")
     
-    # Find Python interpreter
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # Use Homebrew Python 3.11+ (system Python 3.9 lacks StrEnum)
+    find_program(Python3_EXECUTABLE NAMES python3.14 python3.13 python3.12 python3.11 python3
+        PATHS /opt/homebrew/bin /usr/local/bin
+        NO_DEFAULT_PATH)
+    if(NOT Python3_EXECUTABLE)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    endif()
+    message(STATUS "Using Python: ${Python3_EXECUTABLE}")
     
     # Custom target to bootstrap environment (run once)
     add_custom_target(pdfium_bootstrap
