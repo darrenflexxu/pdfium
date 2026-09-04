@@ -397,11 +397,24 @@ void PdfViewerWidget::requestRender() {
 }
 
 QRectF PdfViewerWidget::pageRect() const {
-    if (m_currentImage.isNull()) return QRectF();
+    QSize size;
+    if (!m_currentImage.isNull()) {
+        size = m_currentImage.size();
+    } else if (m_document && m_currentPage >= 0) {
+        QSizeF pageSize = m_document->pageSize(m_currentPage);
+        if (pageSize.isEmpty()) return QRectF();
+        
+        if (m_rotation == 90 || m_rotation == 270) {
+            pageSize.transpose();
+        }
+        size = (pageSize * m_zoom).toSize();
+    } else {
+        return QRectF();
+    }
     
     QPointF center = rect().center() + m_scrollOffset;
     QRectF pageRect;
-    pageRect.setSize(m_currentImage.size());
+    pageRect.setSize(size);
     pageRect.moveCenter(center);
     return pageRect;
 }

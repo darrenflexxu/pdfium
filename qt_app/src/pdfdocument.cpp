@@ -118,7 +118,7 @@ struct PdfDocument::Private {
         loadPage = (LoadPageFunc)library.resolve("PDF_LoadPage");
         closePage = (ClosePageFunc)library.resolve("PDF_ClosePage");
         getPageSize = (GetPageSizeFunc)library.resolve("PDF_GetPageSize");
-        renderPage = (RenderPageFunc)library.resolve("PDF_RenderPage");
+        renderPage = (RenderPageFunc)library.resolve("PDF_RenderPageEx");
         searchText = (SearchTextFunc)library.resolve("PDF_SearchText");
         getPageText = (GetPageTextFunc)library.resolve("PDF_GetPageText");
         freeString = (FreeStringFunc)library.resolve("PDF_FreeString");
