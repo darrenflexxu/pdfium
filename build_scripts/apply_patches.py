@@ -18,6 +18,7 @@ def apply_patches(pdfium_dir: Path, extensions_dir: Path) -> bool:
     dst_public = pdfium_dir / "public"
     
     if src_public.exists():
+        dst_public.mkdir(parents=True, exist_ok=True)
         for header in src_public.glob("*.h"):
             dst_file = dst_public / header.name
             shutil.copy2(header, dst_file)
@@ -35,7 +36,7 @@ def apply_patches(pdfium_dir: Path, extensions_dir: Path) -> bool:
     
     return True
 
-def modify_gn_build(pdfium_dir: Path) -> bool:
+def modify_gn_build(pdfium_dir: Path, enable_v8: bool = True) -> bool:
     """Modify PDFium's GN build files to include our extensions"""
     
     # Find the main BUILD.gn for the pdfium component
@@ -47,75 +48,53 @@ def modify_gn_build(pdfium_dir: Path) -> bool:
     # Read existing BUILD.gn
     content = build_gn.read_text()
     
-    # Check if our extensions are already added
-    if "fpdf_ext_compression" in content:
-        print("Extensions already integrated in BUILD.gn")
-        return True
+    # 1. Fix V8 assertion for fuzzers if V8 is disabled
+    if not enable_v8:
+        # Remove the fuzzer dependency from pdfium_all to avoid assertion fail
+        content = content.replace('"testing/fuzzers",', '')
+        build_gn.write_text(content)
+        print("Removed 'testing/fuzzers' from root BUILD.gn because V8 is disabled")
+        
+        # ALSO: Directly comment out the assertion in the fuzzer BUILD.gn to be safe
+        fuzzer_build_gn = pdfium_dir / "testing" / "fuzzers" / "BUILD.gn"
+        if fuzzer_build_gn.exists():
+            f_content = fuzzer_build_gn.read_text()
+            if "assert(pdf_enable_v8)" in f_content:
+                f_content = f_content.replace("assert(pdf_enable_v8)", "# assert(pdf_enable_v8)")
+                fuzzer_build_gn.write_text(f_content)
+                print("Commented out assert(pdf_enable_v8) in testing/fuzzers/BUILD.gn")
     
-    # Add our extension sources to the pdfium component
-    # This is a simplified approach - in reality, we'd need to find the right
-    # component and add sources there
-    
-    # For now, create a separate BUILD.gn for our extensions
+    # 2. Create separate extension build config if it doesn't exist
     ext_build_gn = pdfium_dir / "fpdf_extensions_build.gn"
-    ext_content = """
+    if not ext_build_gn.exists():
+        ext_content = """
 # PDFium Extensions Build Configuration
-
-# Compression extension
 source_set("fpdf_ext_compression") {
-  sources = [
-    "pdfium_extensions/core/fpdf_ext_compression.cpp",
-  ]
-  
-  include_dirs = [
-    ".",
-    "core/fpdfapi/fpdf_parser/include",
-    "core/fpdfapi/fpdf_page/include",
-    "core/fpdfapi/fpdf_font/include",
-    "third_party/zlib",
-  ]
-  
-  deps = [
-    "core/fpdfapi/fpdf_parser:fpdf_parser",
-    "core/fpdfapi/fpdf_page:fpdf_page",
-    "third_party/zlib:zlib",
-  ]
+  sources = [ "pdfium_extensions/core/fpdf_ext_compression.cpp" ]
+  include_dirs = [ ".", "core/fpdfapi/fpdf_parser/include", "core/fpdfapi/fpdf_page/include", "core/fpdfapi/fpdf_font/include", "third_party/zlib" ]
+  deps = [ "core/fpdfapi/fpdf_parser:fpdf_parser", "core/fpdfapi/fpdf_page:fpdf_page", "third_party/zlib:zlib" ]
 }
-
-# Element extraction extension
 source_set("fpdf_ext_element") {
-  sources = [
-    "pdfium_extensions/core/fpdf_ext_element.cpp",
-  ]
-  
-  include_dirs = [
-    ".",
-    "core/fpdfapi/fpdf_parser/include",
-    "core/fpdfapi/fpdf_page/include",
-    "core/fpdfapi/fpdf_annot/include",
-  ]
-  
-  deps = [
-    "core/fpdfapi/fpdf_parser:fpdf_parser",
-    "core/fpdfapi/fpdf_page:fpdf_page",
-    "core/fpdfapi/fpdf_annot:fpdf_annot",
-  ]
+  sources = [ "pdfium_extensions/core/fpdf_ext_element.cpp" ]
+  include_dirs = [ ".", "core/fpdfapi/fpdf_parser/include", "core/fpdfapi/fpdf_page/include", "core/fpdfapi/fpdf_annot/include" ]
+  deps = [ "core/fpdfapi/fpdf_parser:fpdf_parser", "core/fpdfapi/fpdf_page:fpdf_page", "core/fpdfapi/fpdf_annot:fpdf_annot" ]
 }
-
-# Add to main pdfium component if needed
 """
-    ext_build_gn.write_text(ext_content)
-    print(f"Created extension build config: {ext_build_gn}")
+        ext_build_gn.write_text(ext_content)
+        print(f"Created extension build config: {ext_build_gn}")
     
     return True
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: apply_patches.py <pdfium_dir> <extensions_dir>")
+        print("Usage: apply_patches.py <pdfium_dir> <extensions_dir> [--no-v8]")
         return 1
     
     pdfium_dir = Path(sys.argv[1])
     extensions_dir = Path(sys.argv[2])
+    enable_v8 = True
+    if "--no-v8" in sys.argv:
+        enable_v8 = False
     
     if not pdfium_dir.exists():
         print(f"Error: PDFium directory not found: {pdfium_dir}")
@@ -129,7 +108,7 @@ def main():
     
     success = True
     success &= apply_patches(pdfium_dir, extensions_dir)
-    success &= modify_gn_build(pdfium_dir)
+    success &= modify_gn_build(pdfium_dir, enable_v8)
     
     if success:
         print("Patches applied successfully!")

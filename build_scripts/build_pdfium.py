@@ -61,17 +61,22 @@ class BuildConfig:
     
     @property
     def gn_args(self) -> List[str]:
+        # XFA requires V8. If V8 is disabled, XFA must also be disabled.
+        effective_xfa = self.enable_xfa and self.enable_v8
+        
         args = [
             f'target_os = "{self.target_os}"',
             f'target_cpu = "{self.target_cpu}"',
             f'is_debug = {str(self.is_debug).lower()}',
             f'is_component_build = {str(self.is_component_build).lower()}',
-            f'pdf_enable_xfa = {str(self.enable_xfa).lower()}',
+            f'pdf_enable_xfa = {str(effective_xfa).lower()}',
             f'pdf_enable_v8 = {str(self.enable_v8).lower()}',
             'pdf_use_skia = false',
             'pdf_use_skia_paths = false',
             'use_sysroot = false',
             'use_custom_libcxx = false',
+            'use_safe_libcxx = true',
+            'v8_enable_sandbox = false',
             'clang_use_chrome_plugins = false',
         ]
         
@@ -85,7 +90,12 @@ class PDFiumBuilder:
     def __init__(self, repo_root: Path, config: BuildConfig):
         self.repo_root = repo_root
         self.config = config
-        self.pdfium_dir = repo_root / "third_party" / "pdfium"
+        self.pdfium_wrapper_dir = repo_root / "third_party" / "pdfium"
+        # Resolve actual PDFium source root (handle gclient nested dir)
+        self.pdfium_dir = self.pdfium_wrapper_dir / "pdfium"
+        if not self.pdfium_dir.exists():
+            self.pdfium_dir = self.pdfium_wrapper_dir
+            
         self.depot_tools_dir = repo_root / "depot_tools"
         self.build_dir = self.pdfium_dir / config.build_dir_name
         self.system = platform.system().lower()
@@ -328,6 +338,9 @@ class PDFiumBuilder:
             return True
             
         cmd = [sys.executable, str(apply_script), str(self.pdfium_dir), str(extensions_dir)]
+        if not self.config.enable_v8:
+            cmd.append("--no-v8")
+            
         rc, _, stderr = self.run_cmd(cmd)
         
         if rc != 0:

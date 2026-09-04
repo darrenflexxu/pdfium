@@ -108,6 +108,21 @@ if(BUILD_PDFIUM_FROM_SOURCE)
     endif()
     message(STATUS "Using Python: ${Python3_EXECUTABLE}")
     
+    # Construct build arguments based on options
+    set(PDFIUM_BUILD_ARGS "--target-os" ${PDFIUM_TARGET_OS} "--target-cpu" ${PDFIUM_TARGET_CPU})
+    if(PDFIUM_BUILD_DEBUG)
+        list(APPEND PDFIUM_BUILD_ARGS "--debug")
+    endif()
+    if(NOT PDFIUM_ENABLE_XFA)
+        list(APPEND PDFIUM_BUILD_ARGS "--no-xfa")
+    endif()
+    if(PDFIUM_ENABLE_V8)
+        list(APPEND PDFIUM_BUILD_ARGS "--enable-v8")
+    endif()
+    if(PDFIUM_COMPONENT_BUILD)
+        list(APPEND PDFIUM_BUILD_ARGS "--component")
+    endif()
+
     # Custom target to bootstrap environment (run once)
     add_custom_target(pdfium_bootstrap
         COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BOOTSTRAP_SCRIPT}
@@ -118,13 +133,7 @@ if(BUILD_PDFIUM_FROM_SOURCE)
     
     # Custom target to build PDFium
     add_custom_target(pdfium_build
-        COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT}
-            --target-os ${PDFIUM_TARGET_OS}
-            --target-cpu ${PDFIUM_TARGET_CPU}
-            ${PDFIUM_BUILD_DEBUG} --debug
-            ${PDFIUM_ENABLE_XFA} --no-xfa
-            ${PDFIUM_ENABLE_V8} --enable-v8
-            ${PDFIUM_COMPONENT_BUILD} --component
+        COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT} ${PDFIUM_BUILD_ARGS}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Building PDFium for ${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU}"
         DEPENDS pdfium_bootstrap

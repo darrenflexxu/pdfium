@@ -228,23 +228,38 @@ class BootstrapManager:
         """Sync PDFium source using gclient"""
         log_info("Syncing PDFium source...")
         
+        # Only sync for current platform to avoid cross-platform toolchain issues
+        if self.system == "windows":
+            target_os = '["win"]'
+        elif self.system == "darwin":
+            target_os = '["mac"]'
+        else:
+            target_os = '["linux"]'
+        
         # Create .gclient file
-        gclient_content = """
+        gclient_content = f"""
 solutions = [
-  {
+  {{
     "name": "pdfium",
     "url": "https://pdfium.googlesource.com/pdfium.git",
     "deps_file": "DEPS",
     "managed": True,
-    "custom_deps": {},
+    "custom_deps": {{}},
     "safesync_url": "",
-  },
+  }},
 ]
-target_os = ["linux", "mac", "win"]
+target_os = {target_os}
 """
         gclient_path = self.pdfium_dir / ".gclient"
         self.pdfium_dir.mkdir(parents=True, exist_ok=True)
         gclient_path.write_text(gclient_content.strip())
+        
+        # Reset git state to avoid "uncommitted changes" error during gclient sync
+        # We target the nested pdfium directory if it exists
+        pdfium_src_dir = self.pdfium_dir / "pdfium"
+        if pdfium_src_dir.exists():
+            log_info("Resetting PDFium source git state to allow sync...")
+            self.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=pdfium_src_dir, env=env)
         
         # Run gclient sync
         gclient_cmd = [sys.executable, str(self.depot_tools_dir / "gclient.py"), "sync", "--no-history", "--shallow"]
