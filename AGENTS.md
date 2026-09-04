@@ -2,7 +2,7 @@
 
 ## Project Structure
 - `pdfium_extensions/`: Custom PDFium extensions (Compression, Element Extraction). Built into PDFium.
-- `pdfium_wrapper/`: C API DLL (opaque handles, `extern "C"`). Decouples Qt app from PDFium C++ ABI.
+- `pdfium_wrapper/`: **COM-style C++ interface DLL** (vtable-only abstract interfaces + ref counting). Decouples Qt app from PDFium C++ ABI.
 - `qt_app/`: Qt6 Application. Loads wrapper via `QLibrary::resolve()` (runtime binding).
 - `third_party/pdfium/`: PDFium SDK binaries/headers. **Not in repo.**
 
@@ -27,15 +27,20 @@ cmake --build . --target pdfium_build
 - `pdfium_list_configs`: Show supported OS/CPU configs.
 
 ## Architecture & Implementation
-- **Runtime Loading**: `PdfDocument` resolves DLL symbols at runtime; no link-time dependency on wrapper headers.
+- **COM-style Interfaces**: `pdfium_wrapper.h` defines `IPdfUnknown` (with `AddRef()`/`Release()`), `IPdfDocument`, `IPdfPage`, `IPdfElement` as pure abstract (vtable-only) classes. Lifetime is managed via ref counting.
+- **Runtime Loading**: `PdfDocument` resolves only a small set of C factory symbols (`PDF_CreateDocument`, `PDF_InitLibrary`, `PDF_DestroyLibrary`, `PDF_FreeString`, `PDF_FreeElementData`) at runtime via `QLibrary::resolve`; all other calls go through the interfaces. No link-time dependency on wrapper headers.
+- **Factory Entry Point**: `PDF_CreateDocument(path, password, &err)` returns a new `IPdfDocument*` (caller owns a ref, must `Release()`).
+- **Page/Elem Lifetime**: `IPdfDocument::GetPage()`, `IPdfPage::GetPageElement()`, and `FindElementsByType()` return new refs the caller must `Release()`. Never double-close cached `FPDF_PAGE`s (they belong to the doc impl).
 - **Async Rendering**: `PdfDocument::requestRender()` uses `QtConcurrent`. Results via `renderFinished`.
 - **Color Conversion**: PDFium outputs **BGRA** $\rightarrow$ `PdfDocument` converts to **ARGB**.
 - **Caching**: `PdfViewerWidget` caches last 10 pages (key: page+size+rotation).
 - **Cross-Compile**: Use `PDFIUM_TARGET_OS` and `PDFIUM_TARGET_CPU` (e.g., `win`, `mac`, `linux` | `x64`, `arm64`, `arm`).
+- **Runtime lib name**: On macOS the DLL is `libpdfium_wrapper.dylib`, on Linux `libpdfium_wrapper.so`, on Windows `pdfium_wrapper.dll` (selected via `#ifdef` in `PdfDocument::Private::loadLibrary()`).
 
 ## Common Gotchas
 - **Missing Binaries**: Ensure `third_party/pdfium/` contains the required `.dll`/`.dylib`/`.so` and `.lib`/`.a` files.
-- **Extension Support**: Extension APIs return `UNSUPPORTED` if PDFium was not built with `BUILD_PDFIUM_FROM_SOURCE=ON`.
+- **Extension Support**: Extension APIs return/behave unreliably (fields unsupported) if PDFium was not built with `BUILD_PDFIUM_FROM_SOURCE=ON`. The wrapper guards these with `#ifdef FPDF_CreateElementIterator` / `#ifdef FPDF_OptimizeDocument`.
+- **Ref counting**: Every object returned with a new ref must be matched with a `Release()`, otherwise the impl object (and its underlying PDFium handles) leak.
 - **Blank Pages**: Check console for `FPDF_GetLastError()` codes.
 - **MSVC**: Warnings for PDFium headers are suppressed in root `CMakeLists.txt`.
 

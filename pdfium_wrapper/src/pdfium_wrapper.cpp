@@ -2,10 +2,12 @@
 #include <fpdfview.h>
 #include <fpdf_text.h>
 #include <fpdf_progressive.h>
+#include <atomic>
 #include <string>
 #include <vector>
 #include <map>
 #include <cstring>
+#include <cstdlib>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -14,43 +16,85 @@
     #include <locale>
 #endif
 
+// ============================================================
+// Value structs for element attributes (by-value marshalling)
+// ============================================================
+typedef struct {
+    double font_size;
+    double char_spacing;
+    double word_spacing;
+    double horizontal_scaling;
+    double leading;
+    unsigned int font_flags;
+    unsigned int color_rgb;
+    unsigned int color_alpha;
+    char font_name[256];
+    char font_family[128];
+    int writing_mode;
+    double text_matrix[6];
+} PDF_TextAttributes;
 
-// Internal structures
-struct PDF_Document {
-    FPDF_DOCUMENT doc = nullptr;
-    std::string last_error;
-    std::map<int, FPDF_PAGE> page_cache;
-};
+typedef struct {
+    int width;
+    int height;
+    int bits_per_component;
+    int color_space;
+    int filter;
+    size_t data_size;
+    double matrix[6];
+    int has_mask;
+    int is_inline;
+} PDF_ImageAttributes;
 
-struct PDF_Page {
-    FPDF_PAGE page = nullptr;
-    FPDF_TEXTPAGE text_page = nullptr;
-    PDF_Document* document = nullptr;
-    int index = -1;
-};
+typedef struct {
+    int fill_color_rgb;
+    int fill_color_alpha;
+    int stroke_color_rgb;
+    int stroke_color_alpha;
+    double line_width;
+    int line_cap;
+    int line_join;
+    double miter_limit;
+    int fill_rule;
+    double dash_pattern[16];
+    int dash_count;
+    double dash_phase;
+    double matrix[6];
+} PDF_PathAttributes;
 
-// Global initialization flag
-static bool g_pdfium_initialized = false;
+namespace {
 
-// Helper: Get last error string
-static const char* get_error_string(FPDF_DOCUMENT doc) {
-    unsigned long err = FPDF_GetLastError();
-    static thread_local char buf[256];
-    switch (err) {
-        case FPDF_ERR_SUCCESS: return "Success";
-        case FPDF_ERR_UNKNOWN: return "Unknown error";
-        case FPDF_ERR_FILE: return "File not found or could not be opened";
-        case FPDF_ERR_FORMAT: return "Invalid PDF format";
-        case FPDF_ERR_PASSWORD: return "Incorrect password";
-        case FPDF_ERR_SECURITY: return "Unsupported security scheme";
-        case FPDF_ERR_PAGE: return "Page not found or content error";
-        default:
-            snprintf(buf, sizeof(buf), "PDFium error code: %lu", err);
-            return buf;
+// Global library state
+bool g_pdfium_initialized = false;
+
+// Reference-counting base
+class RefCounted {
+public:
+    RefCounted() : m_refs(1) {}
+    virtual ~RefCounted() {}
+
+    void AddRef() { m_refs.fetch_add(1, std::memory_order_relaxed); }
+
+    void Release() {
+        if (m_refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            delete this;
+        }
     }
+
+private:
+    std::atomic<int> m_refs;
+};
+
+// Store raw string + length for MetaText results
+static char* str_dup(const std::string& str) {
+    char* result = static_cast<char*>(std::malloc(str.size() + 1));
+    if (result) {
+        std::memcpy(result, str.c_str(), str.size() + 1);
+    }
+    return result;
 }
 
-// Helper: Convert UTF-16 to UTF-8
+// Convert UTF-16 to UTF-8
 static std::string utf16_to_utf8(const wchar_t* wstr, int len) {
     if (!wstr || len <= 0) return "";
 #ifdef _WIN32
@@ -68,30 +112,546 @@ static std::string utf16_to_utf8(const wchar_t* wstr, int len) {
 #endif
 }
 
-// Helper: Copy string to heap (caller must free with PDF_FreeString)
-static char* str_dup(const std::string& str) {
-
-    char* result = (char*)malloc(str.size() + 1);
-    if (result) {
-        memcpy(result, str.c_str(), str.size() + 1);
+// Convert UTF-8 to UTF-16 code units (unsigned short), null-terminated.
+static std::vector<unsigned short> utf8_to_utf16(const char* str) {
+    std::vector<unsigned short> result;
+    if (!str) return result;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+    if (wlen <= 0) return result;
+    result.resize(wlen);
+    MultiByteToWideChar(CP_UTF8, 0, str, -1, reinterpret_cast<wchar_t*>(result.data()), wlen);
+#else
+    try {
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        std::wstring wstr = converter.from_bytes(str);
+        for (wchar_t wc : wstr) {
+            result.push_back(static_cast<unsigned short>(wc));
+        }
+        result.push_back(0);
+    } catch (...) {
+        result.clear();
     }
+#endif
     return result;
 }
 
+// Forward decls
+struct PdfPageImpl;
+struct PdfElementImpl;
+
 // ============================================================
-// Library Init/Destroy
+// PdfDocumentImpl
+// ============================================================
+struct PdfDocumentImpl : public IPdfDocument, public RefCounted {
+    FPDF_DOCUMENT doc = nullptr;
+    std::map<int, FPDF_PAGE> page_cache;
+    PDF_DocumentStructure structure;
+    std::string producer, creator, creation_date, mod_date;
+    std::map<std::string, std::string> metadata;
+
+    PdfDocumentImpl() {
+        std::memset(&structure, 0, sizeof(structure));
+    }
+
+    // IPdfUnknown
+    void AddRef() override { RefCounted::AddRef(); }
+    void Release() override { RefCounted::Release(); }
+
+    // IPdfDocument
+    int GetPageCount() override {
+        return doc ? FPDF_GetPageCount(doc) : 0;
+    }
+
+    IPdfPage* GetPage(int page_index) override;
+    void GetSize(int page_index, double* width, double* height) override;
+    PDF_DocumentStructure* GetDocumentStructure() override;
+    const char* GetMetaText(const char* key) override;
+    int Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) override;
+    int SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) override;
+    int GetLastCompressStats(PDF_CompressStats* stats) override;
+
+    ~PdfDocumentImpl() override {
+        for (auto& pair : page_cache) {
+            FPDF_ClosePage(pair.second);
+        }
+        page_cache.clear();
+        if (doc) FPDF_CloseDocument(doc);
+    }
+
+    FPDF_PAGE getPageRef(int index) {
+        auto it = page_cache.find(index);
+        if (it != page_cache.end()) return it->second;
+        FPDF_PAGE p = FPDF_LoadPage(doc, index);
+        if (p) page_cache[index] = p;
+        return p;
+    }
+};
+
+// ============================================================
+// PdfElementImpl
+// ============================================================
+struct PdfElementImpl : public IPdfElement, public RefCounted {
+    PdfPageImpl* owner = nullptr;
+    int index = -1;
+    PDF_ElementType type = PDF_ELEMENT_UNKNOWN;
+    double bounds[4] = {0, 0, 0, 0};
+    PDF_TextAttributes text;
+    PDF_ImageAttributes image;
+    PDF_PathAttributes path;
+
+    // These hold the decoder-side handles from the extensions, if enabled.
+    void* ext_element = nullptr;
+
+    PdfElementImpl() {
+        std::memset(&text, 0, sizeof(text));
+        std::memset(&image, 0, sizeof(image));
+        std::memset(&path, 0, sizeof(path));
+    }
+
+    void AddRef() override { RefCounted::AddRef(); }
+    void Release() override { RefCounted::Release(); }
+
+    PDF_ElementType GetType() override { return type; }
+    void GetBounds(double* out_bounds) override {
+        if (out_bounds) std::memcpy(out_bounds, bounds, sizeof(bounds));
+    }
+    int GetTextAttributes(void* out_attr) override {
+        if (!out_attr) return 0;
+        std::memcpy(out_attr, &text, sizeof(text));
+        return 1;
+    }
+    int GetImageAttributes(void* out_attr) override {
+        if (!out_attr) return 0;
+        std::memcpy(out_attr, &image, sizeof(image));
+        return 1;
+    }
+    int GetPathAttributes(void* out_attr) override {
+        if (!out_attr) return 0;
+        std::memcpy(out_attr, &path, sizeof(path));
+        return 1;
+    }
+    const char* GetElementText(int* out_length) override;
+    unsigned char* GetImageData(size_t* out_size) override;
+    unsigned char* GetPathData(size_t* out_size) override;
+
+    ~PdfElementImpl() override {
+        // owner is released separately by the page's caller
+    }
+};
+
+// ============================================================
+// PdfPageImpl
+// ============================================================
+struct PdfPageImpl : public IPdfPage, public RefCounted {
+    PdfDocumentImpl* document = nullptr;
+    int index = -1;
+    FPDF_PAGE page = nullptr;
+    FPDF_TEXTPAGE text_page = nullptr;
+
+    PdfPageImpl(PdfDocumentImpl* doc, int idx, FPDF_PAGE p) {
+        document = doc;
+        index = idx;
+        page = p;
+        if (document) document->AddRef();
+        text_page = FPDFText_LoadPage(p);
+    }
+
+    void AddRef() override { RefCounted::AddRef(); }
+    void Release() override { RefCounted::Release(); }
+
+    bool Render(int width, int height, int rotation, int flags,
+                void* buffer, int stride) override;
+    void GetSize(double* width, double* height) override {
+        double w = 0, h = 0;
+        if (document && document->doc) {
+            FPDF_GetPageSizeByIndex(document->doc, index, &w, &h);
+        }
+        if (width) *width = w;
+        if (height) *height = h;
+    }
+    int GetIndex() override { return index; }
+    const char* GetText(int* out_length) override;
+    int SearchText(const char* search_text, int flags, int start_index,
+                   int max_results, double* out_bounds, int* out_count) override;
+    int CountPageElements() override;
+    IPdfElement* GetPageElement(int index) override;
+    int FindElementsByType(PDF_ElementType type, IPdfElement** out_elements, int max_count) override;
+
+    ~PdfPageImpl() override {
+        if (text_page) FPDFText_ClosePage(text_page);
+        // Do NOT close the FPDF_PAGE here; it's cached in the document.
+        if (document) document->Release();
+    }
+};
+
+// ============================================================
+// IPdfDocument implementations
+// ============================================================
+IPdfPage* PdfDocumentImpl::GetPage(int page_index) {
+    if (!doc) return nullptr;
+    FPDF_PAGE p = getPageRef(page_index);
+    if (!p) return nullptr;
+    PdfPageImpl* page = new PdfPageImpl(this, page_index, p);
+    return page;
+}
+
+void PdfDocumentImpl::GetSize(int page_index, double* width, double* height) {
+    double w = 0, h = 0;
+    if (doc) FPDF_GetPageSizeByIndex(doc, page_index, &w, &h);
+    if (width) *width = w;
+    if (height) *height = h;
+}
+
+PDF_DocumentStructure* PdfDocumentImpl::GetDocumentStructure() {
+    std::memset(&structure, 0, sizeof(structure));
+    if (!doc) return nullptr;
+
+    structure.page_count = FPDF_GetPageCount(doc);
+
+    // Metadata strings
+    structure.producer[0] = 0;
+    structure.creator[0] = 0;
+    structure.creation_date[0] = 0;
+    structure.mod_date[0] = 0;
+
+#ifdef FPDF_GetMetaText
+    #define COPY_META(key, dest, cap) \
+        do { \
+            unsigned long len = FPDF_GetMetaText(doc, key, nullptr, 0); \
+            if (len > 0 && len < cap) { \
+                std::vector<wchar_t> buf(len); \
+                FPDF_GetMetaText(doc, key, buf.data(), len * sizeof(wchar_t)); \
+                std::string s = utf16_to_utf8(buf.data(), (int)len); \
+                std::memcpy(dest, s.c_str(), s.size()); \
+                dest[s.size()] = 0; \
+            } \
+        } while (0)
+    COPY_META("Producer", structure.producer, 256);
+    COPY_META("Creator", structure.creator, 256);
+    COPY_META("CreationDate", structure.creation_date, 64);
+    COPY_META("ModDate", structure.mod_date, 64);
+    #undef COPY_META
+#endif
+
+    return &structure;
+}
+
+const char* PdfDocumentImpl::GetMetaText(const char* key) {
+    if (!doc || !key) return nullptr;
+
+#ifdef FPDF_GetMetaText
+    unsigned long len = FPDF_GetMetaText(doc, key, nullptr, 0);
+    if (len > 0) {
+        std::vector<wchar_t> buf(len);
+        FPDF_GetMetaText(doc, key, buf.data(), len * sizeof(wchar_t));
+        std::string utf8 = utf16_to_utf8(buf.data(), (int)len);
+        metadata[key] = utf8;
+        return metadata[key].c_str();
+    }
+#endif
+    return nullptr;
+}
+
+int PdfDocumentImpl::Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) {
+    if (!out_handle) return PDF_ERR_INVALID_PARAM;
+    *out_handle = nullptr;
+
+#ifdef FPDF_OptimizeDocument
+    // Extension-based optimization (requires source build with extensions).
+    extern "C" {
+        void FPDF_CompressOptionsInit(void* o);
+        int  FPDF_OptimizeDocument(void* d, const void* o, void** out_d);
+        int  FPDF_SaveWithCompression(void* d, const char* p, const void* o);
+        int  FPDF_GetLastCompressStats(void* s);
+    }
+    FPDF_DOCUMENT new_doc = nullptr;
+    // The extension interface takes FPDF_DOCUMENT and returns FPDF_DOCUMENT.
+    if (FPDF_OptimizeDocument(doc, options, reinterpret_cast<void**>(&new_doc)) && new_doc) {
+        PdfDocumentImpl* wrapper = new PdfDocumentImpl();
+        wrapper->doc = new_doc;
+        *out_handle = wrapper;
+        return PDF_OK;
+    }
+    return PDF_ERR_UNSUPPORTED;
+#else
+    (void)options;
+    return PDF_ERR_UNSUPPORTED;
+#endif
+}
+
+int PdfDocumentImpl::SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) {
+    if (!file_path) return PDF_ERR_INVALID_PARAM;
+
+#ifdef FPDF_OptimizeDocument
+    extern "C" {
+        void FPDF_CompressOptionsInit(void* o);
+        int  FPDF_SaveWithCompression(void* d, const char* p, const void* o);
+    }
+    return FPDF_SaveWithCompression(doc, file_path, options) ? PDF_OK : PDF_ERR_UNKNOWN;
+#else
+    (void)options;
+    return PDF_ERR_UNSUPPORTED;
+#endif
+}
+
+int PdfDocumentImpl::GetLastCompressStats(PDF_CompressStats* stats) {
+    if (!stats) return PDF_ERR_INVALID_PARAM;
+    std::memset(stats, 0, sizeof(*stats));
+
+#ifdef FPDF_OptimizeDocument
+    extern "C" { int FPDF_GetLastCompressStats(void* s); }
+    return FPDF_GetLastCompressStats(stats) ? PDF_OK : PDF_ERR_UNKNOWN;
+#else
+    return PDF_ERR_UNSUPPORTED;
+#endif
+}
+
+// ============================================================
+// IPdfPage implementations
+// ============================================================
+static int render_flags_to_pdfium(int flags) {
+    int pdfium_flags = FPDF_RENDER_NO_SMOOTHTEXT;
+    if (flags & PDF_RENDER_ANNOTATIONS) pdfium_flags |= FPDF_ANNOT;
+    if (flags & PDF_RENDER_LCD_TEXT) pdfium_flags |= FPDF_LCD_TEXT;
+    if (flags & PDF_RENDER_NO_NATIVE_TEXT) pdfium_flags |= FPDF_NO_NATIVETEXT;
+    if (flags & PDF_RENDER_GRAYSCALE) pdfium_flags |= FPDF_GRAYSCALE;
+    if (flags & PDF_RENDER_DEBUG) pdfium_flags |= FPDF_DEBUG_INFO;
+#ifdef FPDF_LIMITEDCOLOR
+    if (flags & PDF_RENDER_LIMITED_COLOR) pdfium_flags |= FPDF_LIMITEDCOLOR;
+#endif
+#ifdef FPDF_FORCEHALFTONE
+    if (flags & PDF_RENDER_FORCE_HALFTONE) pdfium_flags |= FPDF_FORCEHALFTONE;
+#endif
+    if (flags & PDF_RENDER_PRINTING) pdfium_flags |= FPDF_PRINTING;
+    return pdfium_flags;
+}
+
+bool PdfPageImpl::Render(int width, int height, int rotation, int flags,
+                         void* buffer, int stride) {
+    if (!page || !buffer || width <= 0 || height <= 0) return false;
+    if (stride == 0) stride = width * 4;
+
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, buffer, stride);
+    if (!bitmap) return false;
+
+    FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
+
+    int pdfium_rotation = 0;
+    switch (rotation) {
+        case 90: pdfium_rotation = 1; break;
+        case 180: pdfium_rotation = 2; break;
+        case 270: pdfium_rotation = 3; break;
+    }
+
+    int pdfium_flags = render_flags_to_pdfium(flags);
+    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, pdfium_rotation, pdfium_flags);
+
+    FPDFBitmap_Destroy(bitmap);
+    return true;
+}
+
+const char* PdfPageImpl::GetText(int* out_length) {
+    if (out_length) *out_length = 0;
+    if (!text_page) return str_dup("");
+
+    int len = FPDFText_CountChars(text_page);
+    if (len <= 0) return str_dup("");
+
+    std::vector<unsigned short> wbuffer(len + 1);
+    int actual = FPDFText_GetText(text_page, 0, len, wbuffer.data());
+    wbuffer[actual] = 0;
+
+    std::string utf8;
+    try {
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        std::wstring wstr;
+        wstr.reserve(actual);
+        for (int i = 0; i < actual; ++i) {
+            unsigned short us = wbuffer[i];
+            if (us == 0) break;
+            wstr.push_back(static_cast<wchar_t>(us));
+        }
+        utf8 = converter.to_bytes(wstr);
+    } catch (...) {
+        utf8 = "";
+    }
+    if (out_length) *out_length = static_cast<int>(utf8.size());
+    return str_dup(utf8);
+}
+
+int PdfPageImpl::SearchText(const char* search_text, int flags, int start_index,
+                            int max_results, double* out_bounds, int* out_count) {
+    if (!search_text || !out_bounds || !out_count) return PDF_ERR_INVALID_PARAM;
+    *out_count = 0;
+    if (!text_page) return PDF_ERR_UNKNOWN;
+
+    int search_flags = 0;
+    if (flags & PDF_SEARCH_MATCH_CASE) search_flags |= FPDF_MATCHCASE;
+    if (flags & PDF_SEARCH_WHOLE_WORD) search_flags |= FPDF_MATCHWHOLEWORD;
+
+    // Convert search text to UTF-16 code units (FPDF_WIDESTRING)
+    std::vector<unsigned short> wsearch = utf8_to_utf16(search_text);
+    if (wsearch.empty()) return PDF_ERR_UNKNOWN;
+
+    FPDF_SCHHANDLE handle = FPDFText_FindStart(text_page, wsearch.data(), search_flags, start_index);
+    if (!handle) {
+        return PDF_OK;
+    }
+
+    int found = 0;
+    while (found < max_results && FPDFText_FindNext(handle)) {
+        int index = FPDFText_GetSchResultIndex(handle);
+        if (index < start_index) continue;
+
+        double x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+#ifdef FPDFText_GetSchResultRect
+        FPDFText_GetSchResultRect(handle, &x1, &y1, &x2, &y2);
+#endif
+        int base = found * 4;
+        out_bounds[base] = x1;
+        out_bounds[base + 1] = y1;
+        out_bounds[base + 2] = x2;
+        out_bounds[base + 3] = y2;
+        found++;
+    }
+
+    FPDFText_FindClose(handle);
+    *out_count = found;
+    return PDF_OK;
+}
+
+int PdfPageImpl::CountPageElements() {
+#ifdef FPDF_CreateElementIterator
+    extern "C" { int FPDF_CountPageElements(void* page); }
+    return FPDF_CountPageElements(page);
+#else
+    return 0;
+#endif
+}
+
+IPdfElement* PdfPageImpl::GetPageElement(int index) {
+#ifdef FPDF_CreateElementIterator
+    extern "C" { void* FPDF_GetPageElement(void* page, int index); }
+    void* ext = FPDF_GetPageElement(page, index);
+    if (!ext) return nullptr;
+
+    PdfElementImpl* element = new PdfElementImpl();
+    element->owner = this;
+    element->index = index;
+    element->ext_element = ext;
+
+    // Extract type + bounds from the extension element.
+    extern "C" {
+        int  FPDF_GetElementType(void* e);
+        void FPDF_GetElementBounds(void* e, double* b);
+        int  FPDF_GetElementTextAttributes(void* e, void* a);
+        int  FPDF_GetElementImageAttributes(void* e, void* a);
+        int  FPDF_GetElementPathAttributes(void* e, void* a);
+    }
+    element->type = static_cast<PDF_ElementType>(FPDF_GetElementType(ext));
+    FPDF_GetElementBounds(ext, element->bounds);
+    // Note: our PDF_* structs are layout-compatible with FPDF_* attrs.
+    FPDF_GetElementTextAttributes(ext, &element->text);
+    FPDF_GetElementImageAttributes(ext, &element->image);
+    FPDF_GetElementPathAttributes(ext, &element->path);
+    return element;
+#else
+    (void)index;
+    return nullptr;
+#endif
+}
+
+int PdfPageImpl::FindElementsByType(PDF_ElementType type, IPdfElement** out_elements, int max_count) {
+    if (!out_elements || max_count <= 0) return 0;
+
+#ifdef FPDF_CreateElementIterator
+    extern "C" { int FPDF_FindElementsByType(void* page, int type, void** out, int max); }
+    std::vector<void*> raw(max_count);
+    int count = FPDF_FindElementsByType(page, static_cast<int>(type),
+                                        raw.data(), max_count);
+    for (int i = 0; i < count; ++i) {
+        if (raw[i]) {
+            PdfElementImpl* element = new PdfElementImpl();
+            element->owner = this;
+            element->index = -1;
+            element->ext_element = raw[i];
+            extern "C" {
+                int  FPDF_GetElementType(void* e);
+                void FPDF_GetElementBounds(void* e, double* b);
+                int  FPDF_GetElementTextAttributes(void* e, void* a);
+                int  FPDF_GetElementImageAttributes(void* e, void* a);
+                int  FPDF_GetElementPathAttributes(void* e, void* a);
+            }
+            element->type = static_cast<PDF_ElementType>(FPDF_GetElementType(raw[i]));
+            FPDF_GetElementBounds(raw[i], element->bounds);
+            FPDF_GetElementTextAttributes(raw[i], &element->text);
+            FPDF_GetElementImageAttributes(raw[i], &element->image);
+            FPDF_GetElementPathAttributes(raw[i], &element->path);
+            out_elements[i] = element;
+        } else {
+            out_elements[i] = nullptr;
+        }
+    }
+    return count;
+#else
+    (void)type;
+    return 0;
+#endif
+}
+
+// ============================================================
+// IPdfElement implementations
+// ============================================================
+const char* PdfElementImpl::GetElementText(int* out_length) {
+    if (out_length) *out_length = 0;
+#ifdef FPDF_CreateElementIterator
+    if (type == PDF_ELEMENT_TEXT) {
+        extern "C" { const char* FPDF_GetElementText(void* e, int* out_len); }
+        const char* ext = FPDF_GetElementText(ext_element, out_length);
+        if (ext) return ext;
+    }
+#endif
+    return nullptr;
+}
+
+unsigned char* PdfElementImpl::GetImageData(size_t* out_size) {
+    if (out_size) *out_size = 0;
+#ifdef FPDF_CreateElementIterator
+    if (type == PDF_ELEMENT_IMAGE) {
+        extern "C" { unsigned char* FPDF_GetElementImageData(void* e, size_t* out_sz); }
+        return FPDF_GetElementImageData(ext_element, out_size);
+    }
+#endif
+    return nullptr;
+}
+
+unsigned char* PdfElementImpl::GetPathData(size_t* out_size) {
+    if (out_size) *out_size = 0;
+#ifdef FPDF_CreateElementIterator
+    if (type == PDF_ELEMENT_PATH) {
+        extern "C" { unsigned char* FPDF_GetElementPathData(void* e, size_t* out_sz); }
+        return FPDF_GetElementPathData(ext_element, out_size);
+    }
+#endif
+    return nullptr;
+}
+
+} // namespace
+
+// ============================================================
+// Exported C API
 // ============================================================
 PDFWRAPPER_API int PDFWRAPPER_CALL PDF_InitLibrary() {
     if (g_pdfium_initialized) return PDF_OK;
-    
-    // Initialize PDFium
+
     FPDF_LIBRARY_CONFIG config = {0};
     config.version = 2;
     config.m_pUserFontPaths = nullptr;
     config.m_pIsolate = nullptr;
     config.m_v8EmbedderSlot = 0;
     FPDF_InitLibraryWithConfig(&config);
-    
+
     g_pdfium_initialized = true;
     return PDF_OK;
 }
@@ -102,787 +662,46 @@ PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DestroyLibrary() {
     g_pdfium_initialized = false;
 }
 
-// ============================================================
-// Document Management
-// ============================================================
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_LoadDocument(
+PDFWRAPPER_API IPdfDocument* PDFWRAPPER_CALL PDF_CreateDocument(
     const char* file_path,
     const char* password,
-    PDF_DocHandle* out_handle
+    int* out_error
 ) {
-    if (!out_handle || !file_path) return PDF_ERR_INVALID_PARAM;
+    if (!file_path) {
+        if (out_error) *out_error = PDF_ERR_INVALID_PARAM;
+        return nullptr;
+    }
     if (!g_pdfium_initialized) PDF_InitLibrary();
 
     FPDF_DOCUMENT doc = FPDF_LoadDocument(file_path, password);
     if (!doc) {
-        return PDF_ERR_FILE_NOT_FOUND;
+        unsigned long err = FPDF_GetLastError();
+        int code = PDF_ERR_FILE_NOT_FOUND;
+        switch (err) {
+            case FPDF_ERR_PASSWORD: code = PDF_ERR_INVALID_PASSWORD; break;
+            case FPDF_ERR_FORMAT: code = PDF_ERR_FORMAT; break;
+            case FPDF_ERR_SECURITY: code = PDF_ERR_FORMAT; break;
+            case FPDF_ERR_FILE: code = PDF_ERR_FILE_NOT_FOUND; break;
+            default: code = PDF_ERR_UNKNOWN; break;
+        }
+        if (out_error) *out_error = code;
+        return nullptr;
     }
 
-    PDF_Document* wrapper = new PDF_Document();
+    PdfDocumentImpl* wrapper = new PdfDocumentImpl();
     wrapper->doc = doc;
-    *out_handle = wrapper;
-    return PDF_OK;
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_LoadDocumentFromMemory(
-    const void* data,
-    size_t size,
-    const char* password,
-    PDF_DocHandle* out_handle
-) {
-    if (!out_handle || !data || size == 0) return PDF_ERR_INVALID_PARAM;
-    if (!g_pdfium_initialized) PDF_InitLibrary();
-
-    // PDFium doesn't have direct memory load, need to use file access interface
-    // For simplicity, we'll use a temporary file approach or FPDF_LoadCustomDocument
-    // Here we implement a simple file access wrapper
-    
-    // Actually, PDFium supports FPDF_LoadMemDocument in newer versions
-    // Check if available, otherwise fallback
-    FPDF_DOCUMENT doc = nullptr;
-    #ifdef FPDF_LoadMemDocument
-    doc = FPDF_LoadMemDocument(data, (int)size, password);
-    #else
-    // Fallback: Not implemented for older PDFium
-    return PDF_ERR_UNSUPPORTED;
-    #endif
-    
-    if (!doc) {
-        return PDF_ERR_FILE_NOT_FOUND;
-    }
-
-    PDF_Document* wrapper = new PDF_Document();
-    wrapper->doc = doc;
-    *out_handle = wrapper;
-    return PDF_OK;
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_CloseDocument(PDF_DocHandle handle) {
-    if (!handle) return;
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    
-    // Close cached pages
-    for (auto& pair : doc->page_cache) {
-        FPDF_ClosePage(pair.second);
-    }
-    doc->page_cache.clear();
-    
-    if (doc->doc) {
-        FPDF_CloseDocument(doc->doc);
-    }
-    delete doc;
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetDocumentInfo(PDF_DocHandle handle, PDF_DocInfo* out_info) {
-    if (!handle || !out_info) return PDF_ERR_INVALID_PARAM;
-    
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    FPDF_DOCUMENT pdf = doc->doc;
-    
-    int count = FPDF_GetPageCount(pdf);
-    out_info->page_count = count;
-    
-    if (count > 0) {
-        FPDF_PAGE page = FPDF_LoadPage(pdf, 0);
-        if (page) {
-            double w, h;
-            FPDF_GetPageSizeByIndex(pdf, 0, &w, &h);
-            out_info->page_width = w;
-            out_info->page_height = h;
-            FPDF_ClosePage(page);
-        }
-    }
-    
-    // Metadata extraction (simplified)
-    #ifdef FPDF_GetMetaText
-    #define GET_META(key, field) \
-        do { \
-            unsigned long len = FPDF_GetMetaText(pdf, key, nullptr, 0); \
-            if (len > 0) { \
-                std::vector<wchar_t> buf(len); \
-                FPDF_GetMetaText(pdf, key, buf.data(), len * sizeof(wchar_t)); \
-                std::string utf8 = utf16_to_utf8(buf.data(), len); \
-                static thread_local std::string storage; \
-                storage = utf8; \
-                out_info->field = storage.c_str(); \
-            } else { \
-                out_info->field = nullptr; \
-            } \
-        } while(0)
-    #else
-    #define GET_META(key, field) do { out_info->field = nullptr; } while(0)
-    #endif
-    
-    GET_META("Title", title);
-    GET_META("Author", author);
-    GET_META("Subject", subject);
-    GET_META("Keywords", keywords);
-    GET_META("Creator", creator);
-    GET_META("Producer", producer);
-    GET_META("CreationDate", creation_date);
-    GET_META("ModDate", modification_date);
-    
-    return PDF_OK;
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetPageCount(PDF_DocHandle handle) {
-    if (!handle) return PDF_ERR_INVALID_PARAM;
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    return FPDF_GetPageCount(doc->doc);
-}
-
-// ============================================================
-// Page Management
-// ============================================================
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_LoadPage(
-    PDF_DocHandle handle,
-    int page_index,
-    PDF_PageHandle* out_page
-) {
-    if (!handle || !out_page) return PDF_ERR_INVALID_PARAM;
-    
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    int count = FPDF_GetPageCount(doc->doc);
-    
-    if (page_index < 0 || page_index >= count) {
-        return PDF_ERR_INVALID_PARAM;
-    }
-    
-    // Check cache first
-    auto it = doc->page_cache.find(page_index);
-    FPDF_PAGE page;
-    
-    if (it != doc->page_cache.end()) {
-        page = it->second;
-    } else {
-        page = FPDF_LoadPage(doc->doc, page_index);
-        if (!page) return PDF_ERR_UNKNOWN;
-        doc->page_cache[page_index] = page;
-    }
-    
-    PDF_Page* wrapper = new PDF_Page();
-    wrapper->page = page;
-    wrapper->document = doc;
-    wrapper->index = page_index;
-    wrapper->text_page = FPDFText_LoadPage(page);
-    
-    *out_page = wrapper;
-    return PDF_OK;
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_ClosePage(PDF_PageHandle page) {
-    if (!page) return;
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    
-    if (wrapper->text_page) {
-        FPDFText_ClosePage(wrapper->text_page);
-    }
-    // Note: We don't close the FPDF_PAGE here as it's cached in the document
-    delete wrapper;
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_GetPageSize(
-    PDF_PageHandle page,
-    double* width,
-    double* height
-) {
-    if (!page || !width || !height) return;
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    FPDF_GetPageSizeByIndex(wrapper->document->doc, wrapper->index, width, height);
-}
-
-// ============================================================
-// Rendering
-// ============================================================
-static int render_flags_to_pdfium(int flags) {
-    int pdfium_flags = FPDF_RENDER_NO_SMOOTHTEXT; // Default: no smoothing for speed
-    if (flags & PDF_RENDER_ANNOTATIONS) pdfium_flags |= FPDF_ANNOT;
-    if (flags & PDF_RENDER_LCD_TEXT) pdfium_flags |= FPDF_LCD_TEXT;
-    if (flags & PDF_RENDER_NO_NATIVE_TEXT) pdfium_flags |= FPDF_NO_NATIVETEXT;
-    if (flags & PDF_RENDER_GRAYSCALE) pdfium_flags |= FPDF_GRAYSCALE;
-    if (flags & PDF_RENDER_DEBUG) pdfium_flags |= FPDF_DEBUG_INFO;
-    #ifdef FPDF_LIMITEDCOLOR
-    if (flags & PDF_RENDER_LIMITED_COLOR) pdfium_flags |= FPDF_LIMITEDCOLOR;
-    #endif
-    #ifdef FPDF_FORCEHALFTONE
-    if (flags & PDF_RENDER_FORCE_HALFTONE) pdfium_flags |= FPDF_FORCEHALFTONE;
-    #endif
-    if (flags & PDF_RENDER_PRINTING) pdfium_flags |= FPDF_PRINTING;
-    return pdfium_flags;
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_RenderPage(
-    PDF_PageHandle page,
-    int width,
-    int height,
-    int rotation,
-    void* buffer,
-    int stride
-) {
-    return PDF_RenderPageEx(page, width, height, rotation, 0, buffer, stride);
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_RenderPageEx(
-    PDF_PageHandle page,
-    int width,
-    int height,
-    int rotation,
-    int flags,
-    void* buffer,
-    int stride
-) {
-    if (!page || !buffer || width <= 0 || height <= 0) {
-        return PDF_ERR_INVALID_PARAM;
-    }
-    
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    FPDF_PAGE pdf_page = wrapper->page;
-    
-    if (stride == 0) stride = width * 4;
-    
-    // Create bitmap
-    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(width, height, FPDFBitmap_BGRA, buffer, stride);
-    if (!bitmap) return PDF_ERR_OUT_OF_MEMORY;
-    
-    // Fill with white background
-    FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
-    
-    // Render
-    int pdfium_flags = render_flags_to_pdfium(flags);
-    int pdfium_rotation = 0;
-    switch (rotation) {
-        case 90: pdfium_rotation = 1; break;
-        case 180: pdfium_rotation = 2; break;
-        case 270: pdfium_rotation = 3; break;
-    }
-    
-    FPDF_RenderPageBitmap(bitmap, pdf_page, 0, 0, width, height, pdfium_rotation, pdfium_flags);
-    
-    FPDFBitmap_Destroy(bitmap);
-    return PDF_OK;
-}
-
-// ============================================================
-// Text Search & Extraction
-// ============================================================
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SearchText(
-    PDF_PageHandle page,
-    const char* search_text,
-    int flags,
-    int start_index,
-    int max_results,
-    double* out_bounds,
-    int* out_count
-) {
-    if (!page || !search_text || !out_bounds || !out_count) {
-        return PDF_ERR_INVALID_PARAM;
-    }
-    
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    if (!wrapper->text_page) {
-        return PDF_ERR_UNKNOWN;
-    }
-    
-    // Convert search text to UTF-16
-    #ifdef _WIN32
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, search_text, -1, nullptr, 0);
-    std::vector<wchar_t> wsearch(wlen);
-    MultiByteToWideChar(CP_UTF8, 0, search_text, -1, wsearch.data(), wlen);
-    #else
-    std::vector<unsigned short> wsearch;
-    try {
-        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-        std::wstring wsearch_str = converter.from_bytes(search_text);
-        
-        wsearch.reserve(wsearch_str.size() + 1);
-        for(wchar_t wc : wsearch_str) {
-            wsearch.push_back(static_cast<unsigned short>(wc));
-        }
-        wsearch.push_back(0); // Ensure null termination
-    } catch (...) {
-        return PDF_ERR_UNKNOWN;
-    }
-    #endif
-    
-    int search_flags = 0;
-    if (flags & PDF_SEARCH_MATCH_CASE) search_flags |= FPDF_MATCHCASE;
-    if (flags & PDF_SEARCH_WHOLE_WORD) search_flags |= FPDF_MATCHWHOLEWORD;
-    
-    FPDF_SCHHANDLE handle = FPDFText_FindStart(wrapper->text_page, wsearch.data(), search_flags, start_index);
-    if (!handle) {
-        *out_count = 0;
-        return PDF_OK;
-    }
-    
-    int found = 0;
-    int current_index = start_index;
-    
-    while (found < max_results) {
-        if (!FPDFText_FindNext(handle)) break;
-        
-        int index = FPDFText_GetSchResultIndex(handle);
-        if (index < start_index) continue;
-        
-        double x1, y1, x2, y2;
-        // FPDFText_GetSchResultRect might be missing in some versions, 
-        // in that case we just set bounds to 0
-        #ifdef FPDFText_GetSchResultRect
-        FPDFText_GetSchResultRect(handle, &x1, &y1, &x2, &y2);
-        #else
-        x1 = y1 = x2 = y2 = 0;
-        #endif
-        
-        // Store bounds: [x1, y1, x2, y2]
-        int base = found * 4;
-        out_bounds[base] = x1;
-        out_bounds[base + 1] = y1;
-        out_bounds[base + 2] = x2;
-        out_bounds[base + 3] = y2;
-        
-        found++;
-        current_index = index + 1;
-    }
-    
-    FPDFText_FindClose(handle);
-    *out_count = found;
-    return found >= 0 ? PDF_OK : PDF_ERR_UNKNOWN;
-}
-
-PDFWRAPPER_API const char* PDFWRAPPER_CALL PDF_GetPageText(
-    PDF_PageHandle page,
-    int* out_length
-) {
-    if (!page) return nullptr;
-    
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    if (!wrapper->text_page) return nullptr;
-    
-    int len = FPDFText_CountChars(wrapper->text_page);
-    if (len <= 0) {
-        if (out_length) *out_length = 0;
-        return str_dup("");
-    }
-    
-    // Get text in UTF-16
-    int buffer_size = (len + 1) * sizeof(wchar_t);
-    std::vector<unsigned short> wbuffer(len + 1);
-    int actual = FPDFText_GetText(wrapper->text_page, 0, len, wbuffer.data());
-    wbuffer[actual] = 0;
-    
-    // Convert from unsigned short* (UTF-16) to std::string (UTF-8)
-    std::string utf8;
-    try {
-        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-        std::wstring wstr;
-        wstr.reserve(actual);
-        for(unsigned short us : wbuffer) {
-            if (us == 0) break;
-            wstr.push_back(static_cast<wchar_t>(us));
-        }
-        utf8 = converter.to_bytes(wstr);
-    } catch (...) {
-        utf8 = "";
-    }
-    if (out_length) *out_length = utf8.size();
-    
-    return str_dup(utf8);
+    if (out_error) *out_error = PDF_OK;
+    return wrapper;
 }
 
 PDFWRAPPER_API void PDFWRAPPER_CALL PDF_FreeString(const char* str) {
-    if (str) {
-        free(const_cast<char*>(str));
-    }
-}
-
-// ============================================================
-// Coordinate Transformation
-// ============================================================
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_PageToDevice(
-    PDF_PageHandle page,
-    int page_width,
-    int page_height,
-    int rotation,
-    double page_x,
-    double page_y,
-    int* device_x,
-    int* device_y
-) {
-    if (!page || !device_x || !device_y) return;
-    
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    int dev_x, dev_y;
-    FPDF_PageToDevice(wrapper->page, 0, 0, page_width, page_height, rotation, page_x, page_y, &dev_x, &dev_y);
-    *device_x = dev_x;
-    *device_y = dev_y;
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DeviceToPage(
-    PDF_PageHandle page,
-    int page_width,
-    int page_height,
-    int rotation,
-    int device_x,
-    int device_y,
-    double* page_x,
-    double* page_y
-) {
-    if (!page || !page_x || !page_y) return;
-    
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    double pg_x, pg_y;
-    FPDF_DeviceToPage(wrapper->page, 0, 0, page_width, page_height, rotation, device_x, device_y, &pg_x, &pg_y);
-    *page_x = pg_x;
-    *page_y = pg_y;
-}
-
-// ============================================================
-// PDF Compression / Optimization API
-// ============================================================
-
-// Forward declarations for extension functions
-// These would be available if PDFium was built with our extensions
-#ifdef FPDF_OptimizeDocument
-extern "C" {
-    void FPDF_CompressOptionsInit(void* options);
-    int FPDF_OptimizeDocument(void* doc, const void* options, void** out_doc);
-    int FPDF_SaveWithCompression(void* doc, const char* path, const void* options);
-    int FPDF_GetLastCompressStats(void* stats);
-}
-#endif
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_CompressOptionsInit(PDF_CompressOptions* options) {
-    if (!options) return;
-    #ifdef FPDF_OptimizeDocument
-    FPDF_CompressOptionsInit(options);
-    #else
-    memset(options, 0, sizeof(PDF_CompressOptions));
-    options->flags = PDF_COMPRESS_DEFAULT;
-    options->image_quality = PDF_IMAGE_QUALITY_HIGH;
-    options->image_dpi_threshold = 300;
-    options->min_image_dpi = 150;
-    options->font_subset_threshold = 80;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_OptimizeDocument(
-    PDF_DocHandle handle,
-    const PDF_CompressOptions* options,
-    PDF_DocHandle* out_handle
-) {
-    if (!handle || !out_handle) return PDF_ERR_INVALID_PARAM;
-    
-    #ifdef FPDF_OptimizeDocument
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    FPDF_DOCUMENT new_doc = nullptr;
-    int result = FPDF_OptimizeDocument(doc->doc, options, &new_doc);
-    if (result && new_doc) {
-        PDF_Document* wrapper = new PDF_Document();
-        wrapper->doc = new_doc;
-        *out_handle = wrapper;
-        return PDF_OK;
-    }
-    return PDF_ERR_UNSUPPORTED;
-    #else
-    (void)options;
-    return PDF_ERR_UNSUPPORTED;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SaveWithCompression(
-    PDF_DocHandle handle,
-    const char* file_path,
-    const PDF_CompressOptions* options
-) {
-    if (!handle || !file_path) return PDF_ERR_INVALID_PARAM;
-    
-    #ifdef FPDF_OptimizeDocument
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    return FPDF_SaveWithCompression(doc->doc, file_path, options) ? PDF_OK : PDF_ERR_UNKNOWN;
-    #else
-    (void)options;
-    return PDF_ERR_UNSUPPORTED;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetLastCompressStats(PDF_CompressStats* stats) {
-    if (!stats) return PDF_ERR_INVALID_PARAM;
-    
-    #ifdef FPDF_OptimizeDocument
-    return FPDF_GetLastCompressStats(stats) ? PDF_OK : PDF_ERR_UNKNOWN;
-    #else
-    memset(stats, 0, sizeof(PDF_CompressStats));
-    return PDF_ERR_UNSUPPORTED;
-    #endif
-}
-
-// ============================================================
-// Element Extraction API
-// ============================================================
-
-// Forward declarations for extension functions
-#ifdef FPDF_CreateElementIterator
-extern "C" {
-    void* FPDF_CreateElementIterator(void* page);
-    void* FPDF_GetNextElement(void* iterator);
-    void FPDF_DestroyElementIterator(void* iterator);
-    int FPDF_GetElementType(void* element);
-    void FPDF_GetElementBounds(void* element, double* bounds);
-    int FPDF_GetElementTextAttributes(void* element, void* attrs);
-    int FPDF_GetElementImageAttributes(void* element, void* attrs);
-    int FPDF_GetElementPathAttributes(void* element, void* attrs);
-    const char* FPDF_GetElementText(void* element, int* out_len);
-    unsigned char* FPDF_GetElementImageData(void* element, size_t* out_size);
-    unsigned char* FPDF_GetElementPathData(void* element, size_t* out_size);
-    void FPDF_FreeElementData(void* data);
-    int FPDF_CountPageElements(void* page);
-    void* FPDF_GetPageElement(void* page, int index);
-    int FPDF_FindElementsByType(void* page, int type, void** out_elements, int max_count);
-    int FPDF_SearchTextEx(void* page, const char* text, int flags, int start, int max, void* matches, int* count);
-    int FPDF_ExtractFormFields(void* doc, void* fields, int max);
-    int FPDF_ExtractAnnotations(void* page, void* annots, int max);
-    int FPDF_ExtractBookmarks(void* doc, void* bookmarks, int max);
-    int FPDF_GetDocumentStructure(void* doc, void* info);
-}
-#endif
-
-PDFWRAPPER_API PDF_ElementIteratorHandle PDFWRAPPER_CALL PDF_CreateElementIterator(PDF_PageHandle page) {
-    if (!page) return nullptr;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_CreateElementIterator(wrapper->page);
-    #else
-    return nullptr;
-    #endif
-}
-
-PDFWRAPPER_API PDF_ElementHandle PDFWRAPPER_CALL PDF_GetNextElement(PDF_ElementIteratorHandle iterator) {
-    if (!iterator) return nullptr;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetNextElement(iterator);
-    #else
-    return nullptr;
-    #endif
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DestroyElementIterator(PDF_ElementIteratorHandle iterator) {
-    if (!iterator) return;
-    
-    #ifdef FPDF_CreateElementIterator
-    FPDF_DestroyElementIterator(iterator);
-    #endif
-}
-
-PDFWRAPPER_API PDF_ElementType PDFWRAPPER_CALL PDF_GetElementType(PDF_ElementHandle element) {
-    if (!element) return PDF_ELEMENT_UNKNOWN;
-    
-    #ifdef FPDF_CreateElementIterator
-    return static_cast<PDF_ElementType>(FPDF_GetElementType(element));
-    #else
-    return PDF_ELEMENT_UNKNOWN;
-    #endif
-}
-
-PDFWRAPPER_API void PDFWRAPPER_CALL PDF_GetElementBounds(PDF_ElementHandle element, double* bounds) {
-    if (!element || !bounds) return;
-    
-    #ifdef FPDF_CreateElementIterator
-    FPDF_GetElementBounds(element, bounds);
-    #else
-    bounds[0] = bounds[1] = bounds[2] = bounds[3] = 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementTextAttributes(PDF_ElementHandle element, PDF_TextAttributes* out_attr) {
-    if (!element || !out_attr) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementTextAttributes(element, out_attr);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementImageAttributes(PDF_ElementHandle element, PDF_ImageAttributes* out_attr) {
-    if (!element || !out_attr) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementImageAttributes(element, out_attr);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetElementPathAttributes(PDF_ElementHandle element, PDF_PathAttributes* out_attr) {
-    if (!element || !out_attr) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementPathAttributes(element, out_attr);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API const char* PDFWRAPPER_CALL PDF_GetElementText(PDF_ElementHandle element, int* out_length) {
-    if (!element) {
-        if (out_length) *out_length = 0;
-        return nullptr;
-    }
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementText(element, out_length);
-    #else
-    if (out_length) *out_length = 0;
-    return nullptr;
-    #endif
-}
-
-PDFWRAPPER_API unsigned char* PDFWRAPPER_CALL PDF_GetElementImageData(PDF_ElementHandle element, size_t* out_size) {
-    if (!element || !out_size) return nullptr;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementImageData(element, out_size);
-    #else
-    *out_size = 0;
-    return nullptr;
-    #endif
-}
-
-PDFWRAPPER_API unsigned char* PDFWRAPPER_CALL PDF_GetElementPathData(PDF_ElementHandle element, size_t* out_size) {
-    if (!element || !out_size) return nullptr;
-    
-    #ifdef FPDF_CreateElementIterator
-    return FPDF_GetElementPathData(element, out_size);
-    #else
-    *out_size = 0;
-    return nullptr;
-    #endif
+    if (str) std::free(const_cast<char*>(str));
 }
 
 PDFWRAPPER_API void PDFWRAPPER_CALL PDF_FreeElementData(void* data) {
     if (!data) return;
-    
-    #ifdef FPDF_CreateElementIterator
+#ifdef FPDF_CreateElementIterator
+    extern "C" { void FPDF_FreeElementData(void* data); }
     FPDF_FreeElementData(data);
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_CountPageElements(PDF_PageHandle page) {
-    if (!page) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_CountPageElements(wrapper->page);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API PDF_ElementHandle PDFWRAPPER_CALL PDF_GetPageElement(PDF_PageHandle page, int index) {
-    if (!page || index < 0) return nullptr;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_GetPageElement(wrapper->page, index);
-    #else
-    return nullptr;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_FindElementsByType(
-    PDF_PageHandle page,
-    PDF_ElementType type,
-    PDF_ElementHandle* out_elements,
-    int max_count
-) {
-    if (!page || !out_elements || max_count <= 0) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_FindElementsByType(wrapper->page, static_cast<int>(type), 
-                                    reinterpret_cast<void**>(out_elements), max_count);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SearchTextEx(
-    PDF_PageHandle page,
-    const char* search_text,
-    int flags,
-    int start_index,
-    int max_results,
-    PDF_TextMatchEx* out_matches,
-    int* out_count
-) {
-    if (!page || !search_text || !out_matches || !out_count) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_SearchTextEx(wrapper->page, search_text, flags, start_index, max_results,
-                             reinterpret_cast<void*>(out_matches), out_count);
-    #else
-    *out_count = 0;
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractFormFields(
-    PDF_DocHandle handle,
-    PDF_FormFieldInfo* out_fields,
-    int max_fields
-) {
-    if (!handle || !out_fields || max_fields <= 0) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    return FPDF_ExtractFormFields(doc->doc, out_fields, max_fields);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractAnnotations(
-    PDF_PageHandle page,
-    PDF_AnnotInfo* out_annots,
-    int max_annots
-) {
-    if (!page || !out_annots || max_annots <= 0) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Page* wrapper = static_cast<PDF_Page*>(page);
-    return FPDF_ExtractAnnotations(wrapper->page, out_annots, max_annots);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_ExtractBookmarks(
-    PDF_DocHandle handle,
-    PDF_BookmarkInfo* out_bookmarks,
-    int max_bookmarks
-) {
-    if (!handle || !out_bookmarks || max_bookmarks <= 0) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    return FPDF_ExtractBookmarks(doc->doc, out_bookmarks, max_bookmarks);
-    #else
-    return 0;
-    #endif
-}
-
-PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetDocumentStructure(
-    PDF_DocHandle handle,
-    PDF_DocumentStructure* out_info
-) {
-    if (!handle || !out_info) return 0;
-    
-    #ifdef FPDF_CreateElementIterator
-    PDF_Document* doc = static_cast<PDF_Document*>(handle);
-    return FPDF_GetDocumentStructure(doc->doc, out_info);
-    #else
-    return 0;
-    #endif
+#endif
 }

@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 # Target: pdfium_wrapper (Shared Library)
 # ------------------------------------------------------------
 add_library(pdfium_wrapper SHARED
+    include/pdfium_wrapper.h
     src/pdfium_wrapper.cpp
 )
 
