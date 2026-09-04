@@ -80,7 +80,7 @@ add_library(pdfium INTERFACE)
 
 # Common include directory (will exist after pdfium_build)
 target_include_directories(pdfium
-    INTERFACE
+    SYSTEM INTERFACE
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/include>
 )
 
@@ -88,7 +88,7 @@ target_include_directories(pdfium
 if(WIN32)
     target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium.lib)
 elseif(APPLE)
-    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.dylib)
+    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.a)
 else()
     target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.so)
 endif()

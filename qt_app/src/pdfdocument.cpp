@@ -1,5 +1,6 @@
 #include "pdfdocument.h"
 #include <QtCore>
+#include <QtConcurrent>
 #include <pdfium_wrapper.h>
 
 // PIMPL to hide DLL types from header
@@ -97,6 +98,8 @@ struct PdfDocument::Private {
         // Try to load the wrapper DLL
         #ifdef _WIN32
         library.setFileName("pdfium_wrapper.dll");
+        #elif defined(__APPLE__)
+        library.setFileName("libpdfium_wrapper.dylib");
         #else
         library.setFileName("libpdfium_wrapper.so");
         #endif
@@ -440,7 +443,7 @@ int PdfDocument::countPageElements(int pageIndex) const {
     return count;
 }
 
-PdfDocument::PdfElementInfo PdfDocument::getPageElement(int pageIndex, int elementIndex) const {
+PdfElementInfo PdfDocument::getPageElement(int pageIndex, int elementIndex) const {
     PdfElementInfo info;
     if (!m_docHandle || !d->getPageElement || !d->loadPage || !d->closePage ||
         !d->getElementType || !d->getElementBounds) {
@@ -451,21 +454,18 @@ PdfDocument::PdfElementInfo PdfDocument::getPageElement(int pageIndex, int eleme
     int result = d->loadPage(m_docHandle, pageIndex, &page);
     if (result != PDF_OK || !page) return info;
     
-    PDF_ElementHandle element = d->getPageElement(page, elementIndex);
+    PDF_ElementHandle element = static_cast<PDF_ElementHandle>(d->getPageElement(page, elementIndex));
     if (!element) {
         d->closePage(page);
         return info;
     }
     
-    // Get type
     info.type = static_cast<PdfElementType>(d->getElementType(element));
     
-    // Get bounds
     double bounds[4];
     d->getElementBounds(element, bounds);
     info.bounds = QRectF(QPointF(bounds[0], bounds[1]), QPointF(bounds[2], bounds[3])).normalized();
     
-    // Get type-specific attributes
     if (info.type == PdfElementType::Text && d->getElementTextAttrs) {
         d->getElementTextAttrs(element, &info.text_attrs);
     } else if (info.type == PdfElementType::Image && d->getElementImageAttrs) {
@@ -478,7 +478,7 @@ PdfDocument::PdfElementInfo PdfDocument::getPageElement(int pageIndex, int eleme
     return info;
 }
 
-QList<PdfDocument::PdfElementInfo> PdfDocument::findElementsByType(int pageIndex, PdfElementType type) const {
+QList<PdfElementInfo> PdfDocument::findElementsByType(int pageIndex, PdfElementType type) const {
     QList<PdfElementInfo> results;
     if (!m_docHandle || !d->findElementsByType || !d->loadPage || !d->closePage ||
         !d->getElementType || !d->getElementBounds) {
@@ -492,7 +492,7 @@ QList<PdfDocument::PdfElementInfo> PdfDocument::findElementsByType(int pageIndex
     const int maxElements = 100;
     std::vector<PDF_ElementHandle> elements(maxElements);
     int count = d->findElementsByType(page, static_cast<int>(type), 
-                                       reinterpret_cast<void**>(elements.data()), maxElements);
+                                        reinterpret_cast<void**>(elements.data()), maxElements);
     
     for (int i = 0; i < count; ++i) {
         PdfElementInfo info;
@@ -526,7 +526,7 @@ QString PdfDocument::getElementText(int pageIndex, int elementIndex) const {
     int result = d->loadPage(m_docHandle, pageIndex, &page);
     if (result != PDF_OK || !page) return QString();
     
-    PDF_ElementHandle element = d->getPageElement(page, elementIndex);
+    PDF_ElementHandle element = static_cast<PDF_ElementHandle>(d->getPageElement(page, elementIndex));
     if (!element) {
         d->closePage(page);
         return QString();
@@ -550,7 +550,7 @@ QByteArray PdfDocument::getElementImageData(int pageIndex, int elementIndex) con
     int result = d->loadPage(m_docHandle, pageIndex, &page);
     if (result != PDF_OK || !page) return data;
     
-    PDF_ElementHandle element = d->getPageElement(page, elementIndex);
+    PDF_ElementHandle element = static_cast<PDF_ElementHandle>(d->getPageElement(page, elementIndex));
     if (!element) {
         d->closePage(page);
         return data;
@@ -576,7 +576,7 @@ QByteArray PdfDocument::getElementPathData(int pageIndex, int elementIndex) cons
     int result = d->loadPage(m_docHandle, pageIndex, &page);
     if (result != PDF_OK || !page) return data;
     
-    PDF_ElementHandle element = d->getPageElement(page, elementIndex);
+    PDF_ElementHandle element = static_cast<PDF_ElementHandle>(d->getPageElement(page, elementIndex));
     if (!element) {
         d->closePage(page);
         return data;
@@ -592,7 +592,7 @@ QByteArray PdfDocument::getElementPathData(int pageIndex, int elementIndex) cons
     return data;
 }
 
-QList<PdfDocument::PdfFormFieldInfo> PdfDocument::extractFormFields() const {
+QList<PdfFormFieldInfo> PdfDocument::extractFormFields() const {
     QList<PdfFormFieldInfo> results;
     if (!m_docHandle || !d->extractFormFields) {
         return results;
@@ -605,7 +605,7 @@ QList<PdfDocument::PdfFormFieldInfo> PdfDocument::extractFormFields() const {
     return results;
 }
 
-QList<PdfDocument::PdfAnnotInfo> PdfDocument::extractAnnotations(int pageIndex) const {
+QList<PdfAnnotInfo> PdfDocument::extractAnnotations(int pageIndex) const {
     QList<PdfAnnotInfo> results;
     if (!m_docHandle || !d->extractAnnotations || !d->loadPage || !d->closePage) {
         return results;
@@ -617,10 +617,11 @@ QList<PdfDocument::PdfAnnotInfo> PdfDocument::extractAnnotations(int pageIndex) 
     
     const int maxAnnots = 50;
     // Placeholder - actual implementation would map DLL structures
+    d->closePage(page);
     return results;
 }
 
-QList<PdfDocument::PdfBookmarkInfo> PdfDocument::extractBookmarks() const {
+QList<PdfBookmarkInfo> PdfDocument::extractBookmarks() const {
     QList<PdfBookmarkInfo> results;
     if (!m_docHandle || !d->extractBookmarks) {
         return results;
@@ -630,7 +631,7 @@ QList<PdfDocument::PdfBookmarkInfo> PdfDocument::extractBookmarks() const {
     return results;
 }
 
-PdfDocument::PdfDocumentStructure PdfDocument::getDocumentStructure() const {
+PdfDocumentStructure PdfDocument::getDocumentStructure() const {
     PdfDocumentStructure info;
     if (!m_docHandle || !d->getDocumentStructure) {
         return info;

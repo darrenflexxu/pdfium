@@ -22,9 +22,9 @@ int main(int argc, char* argv[]) {
     parser.addVersionOption();
     
     QCommandLineOption fileOption(QStringList() << "f" << "file",
-                                  tr("Open specified PDF file"),
-                                  tr("file"));
-    parser.addPositionalArgument("file", tr("PDF file to open"));
+                                   "Open specified PDF file",
+                                   "file");
+    parser.addPositionalArgument("file", "PDF file to open");
     parser.addOption(fileOption);
     
     parser.process(app);

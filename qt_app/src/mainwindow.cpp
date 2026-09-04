@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "pdfviewerwidget.h"
 #include "pdfdocument.h"
+#include <QApplication>
+#include <QClipboard>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QPrintDialog>
@@ -16,6 +18,12 @@
 #include <QDockWidget>
 #include <QListWidget>
 #include <QVBoxLayout>
+#include <QGroupBox>
+#include <QCheckBox>
+#include <QDialogButtonBox>
+#include <QDialog>
+#include <QTextEdit>
+#include <QFontDatabase>
 #include <QDebug>
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -41,10 +49,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_viewer, &PdfViewerWidget::textSelected, this, &MainWindow::onTextSelected);
     
     // Connect document signals for new features
-    PdfDocument* doc = m_viewer->document();
-    if (doc) {
-        connect(doc, &PdfDocument::optimizeFinished, this, &MainWindow::onOptimizeFinished);
-        connect(doc, &PdfDocument::saveCompressedFinished, this, &MainWindow::onSaveCompressedFinished);
+    PdfDocument* currentDoc = m_viewer->document();
+    if (currentDoc) {
+        connect(currentDoc, &PdfDocument::optimizeFinished, this, &MainWindow::onOptimizeFinished);
+        connect(currentDoc, &PdfDocument::saveCompressedFinished, this, &MainWindow::onSaveCompressedFinished);
     }
     
     // Window settings

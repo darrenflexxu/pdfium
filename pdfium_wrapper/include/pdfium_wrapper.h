@@ -1,6 +1,8 @@
 #ifndef PDFIUM_WRAPPER_H
 #define PDFIUM_WRAPPER_H
 
+#include <stddef.h>
+
 #ifdef _WIN32
     #ifdef PDFWRAPPER_EXPORTS
         #define PDFWRAPPER_API __declspec(dllexport)
@@ -30,6 +32,7 @@ typedef enum {
     PDF_ERR_INVALID_PARAM = -4,
     PDF_ERR_OUT_OF_MEMORY = -5,
     PDF_ERR_UNSUPPORTED = -6,
+    PDF_ERR_FORMAT = -7,
 } PDF_Error;
 
 // Document info structure

@@ -10,37 +10,15 @@
 #include <QFuture>
 #include <QFutureWatcher>
 #include <memory>
+#include "pdfium_wrapper.h"
 
 // Forward declare DLL handle types
 struct PDF_Document;
 struct PDF_Page;
-struct PDF_ElementHandle;
-struct PDF_ElementIteratorHandle;
-
-// Compression structures (matching DLL API)
-struct PDF_CompressOptions {
-    int flags = 0;
-    int image_quality = 90;
-    int image_dpi_threshold = 300;
-    int min_image_dpi = 150;
-    int font_subset_threshold = 80;
-    int remove_annotations = 0;
-    int remove_forms = 0;
-    int remove_bookmarks = 0;
-    int remove_metadata = 0;
-};
-
-struct PDF_CompressStats {
-    size_t original_size = 0;
-    size_t compressed_size = 0;
-    double compression_ratio = 0.0;
-    int objects_removed = 0;
-    int images_recompressed = 0;
-    int fonts_subsets = 0;
-};
 
 // Element structures
 enum class PdfElementType {
+
     Unknown = 0,
     Text = 1,
     Image = 2,

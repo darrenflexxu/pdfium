@@ -5,6 +5,15 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <cstring>
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <codecvt>
+    #include <locale>
+#endif
+
 
 // Internal structures
 struct PDF_Document {
@@ -44,14 +53,24 @@ static const char* get_error_string(FPDF_DOCUMENT doc) {
 // Helper: Convert UTF-16 to UTF-8
 static std::string utf16_to_utf8(const wchar_t* wstr, int len) {
     if (!wstr || len <= 0) return "";
+#ifdef _WIN32
     int size = WideCharToMultiByte(CP_UTF8, 0, wstr, len, nullptr, 0, nullptr, nullptr);
     std::string result(size, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr, len, &result[0], size, nullptr, nullptr);
     return result;
+#else
+    try {
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        return converter.to_bytes(wstr, wstr + len);
+    } catch (...) {
+        return "";
+    }
+#endif
 }
 
 // Helper: Copy string to heap (caller must free with PDF_FreeString)
 static char* str_dup(const std::string& str) {
+
     char* result = (char*)malloc(str.size() + 1);
     if (result) {
         memcpy(result, str.c_str(), str.size() + 1);
@@ -120,13 +139,14 @@ PDFWRAPPER_API int PDFWRAPPER_CALL PDF_LoadDocumentFromMemory(
     
     // Actually, PDFium supports FPDF_LoadMemDocument in newer versions
     // Check if available, otherwise fallback
+    FPDF_DOCUMENT doc = nullptr;
     #ifdef FPDF_LoadMemDocument
-    FPDF_DOCUMENT doc = FPDF_LoadMemDocument(data, (int)size, password);
+    doc = FPDF_LoadMemDocument(data, (int)size, password);
     #else
     // Fallback: Not implemented for older PDFium
     return PDF_ERR_UNSUPPORTED;
     #endif
-
+    
     if (!doc) {
         return PDF_ERR_FILE_NOT_FOUND;
     }
@@ -174,6 +194,7 @@ PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetDocumentInfo(PDF_DocHandle handle, PDF
     }
     
     // Metadata extraction (simplified)
+    #ifdef FPDF_GetMetaText
     #define GET_META(key, field) \
         do { \
             unsigned long len = FPDF_GetMetaText(pdf, key, nullptr, 0); \
@@ -188,6 +209,9 @@ PDFWRAPPER_API int PDFWRAPPER_CALL PDF_GetDocumentInfo(PDF_DocHandle handle, PDF
                 out_info->field = nullptr; \
             } \
         } while(0)
+    #else
+    #define GET_META(key, field) do { out_info->field = nullptr; } while(0)
+    #endif
     
     GET_META("Title", title);
     GET_META("Author", author);
@@ -277,8 +301,12 @@ static int render_flags_to_pdfium(int flags) {
     if (flags & PDF_RENDER_NO_NATIVE_TEXT) pdfium_flags |= FPDF_NO_NATIVETEXT;
     if (flags & PDF_RENDER_GRAYSCALE) pdfium_flags |= FPDF_GRAYSCALE;
     if (flags & PDF_RENDER_DEBUG) pdfium_flags |= FPDF_DEBUG_INFO;
+    #ifdef FPDF_LIMITEDCOLOR
     if (flags & PDF_RENDER_LIMITED_COLOR) pdfium_flags |= FPDF_LIMITEDCOLOR;
+    #endif
+    #ifdef FPDF_FORCEHALFTONE
     if (flags & PDF_RENDER_FORCE_HALFTONE) pdfium_flags |= FPDF_FORCEHALFTONE;
+    #endif
     if (flags & PDF_RENDER_PRINTING) pdfium_flags |= FPDF_PRINTING;
     return pdfium_flags;
 }
@@ -356,9 +384,25 @@ PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SearchText(
     }
     
     // Convert search text to UTF-16
+    #ifdef _WIN32
     int wlen = MultiByteToWideChar(CP_UTF8, 0, search_text, -1, nullptr, 0);
     std::vector<wchar_t> wsearch(wlen);
     MultiByteToWideChar(CP_UTF8, 0, search_text, -1, wsearch.data(), wlen);
+    #else
+    std::vector<unsigned short> wsearch;
+    try {
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        std::wstring wsearch_str = converter.from_bytes(search_text);
+        
+        wsearch.reserve(wsearch_str.size() + 1);
+        for(wchar_t wc : wsearch_str) {
+            wsearch.push_back(static_cast<unsigned short>(wc));
+        }
+        wsearch.push_back(0); // Ensure null termination
+    } catch (...) {
+        return PDF_ERR_UNKNOWN;
+    }
+    #endif
     
     int search_flags = 0;
     if (flags & PDF_SEARCH_MATCH_CASE) search_flags |= FPDF_MATCHCASE;
@@ -380,7 +424,13 @@ PDFWRAPPER_API int PDFWRAPPER_CALL PDF_SearchText(
         if (index < start_index) continue;
         
         double x1, y1, x2, y2;
+        // FPDFText_GetSchResultRect might be missing in some versions, 
+        // in that case we just set bounds to 0
+        #ifdef FPDFText_GetSchResultRect
         FPDFText_GetSchResultRect(handle, &x1, &y1, &x2, &y2);
+        #else
+        x1 = y1 = x2 = y2 = 0;
+        #endif
         
         // Store bounds: [x1, y1, x2, y2]
         int base = found * 4;
@@ -415,11 +465,24 @@ PDFWRAPPER_API const char* PDFWRAPPER_CALL PDF_GetPageText(
     
     // Get text in UTF-16
     int buffer_size = (len + 1) * sizeof(wchar_t);
-    std::vector<wchar_t> wbuffer(len + 1);
+    std::vector<unsigned short> wbuffer(len + 1);
     int actual = FPDFText_GetText(wrapper->text_page, 0, len, wbuffer.data());
     wbuffer[actual] = 0;
     
-    std::string utf8 = utf16_to_utf8(wbuffer.data(), actual);
+    // Convert from unsigned short* (UTF-16) to std::string (UTF-8)
+    std::string utf8;
+    try {
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        std::wstring wstr;
+        wstr.reserve(actual);
+        for(unsigned short us : wbuffer) {
+            if (us == 0) break;
+            wstr.push_back(static_cast<wchar_t>(us));
+        }
+        utf8 = converter.to_bytes(wstr);
+    } catch (...) {
+        utf8 = "";
+    }
     if (out_length) *out_length = utf8.size();
     
     return str_dup(utf8);

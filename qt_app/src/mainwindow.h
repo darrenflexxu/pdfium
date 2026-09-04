@@ -1,10 +1,13 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <iostream>
+#include <vector>
 #include <QMainWindow>
 #include <QAction>
 #include <QToolBar>
 #include <QStatusBar>
+#include <QLabel>
 
 class PdfViewerWidget;
 

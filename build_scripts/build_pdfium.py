@@ -78,6 +78,7 @@ class BuildConfig:
             'use_safe_libcxx = true',
             'v8_enable_sandbox = false',
             'clang_use_chrome_plugins = false',
+            'pdf_is_complete_lib = true',
         ]
         
         # Platform-specific args
@@ -277,8 +278,12 @@ class PDFiumBuilder:
             found = list(self.build_dir.rglob(pattern))
             if found:
                 for f in found:
-                    shutil.copy2(f, dst_dir / f.name)
-                    log_info(f"Copied {f.name} to {dst_dir}")
+                    # Prefer lib_dir for static libs and dylibs to keep pdfium_wrapper happy
+                    target_dir = lib_dir if (f.suffix == ".a" or f.suffix == ".dylib") else dst_dir
+                    shutil.copy2(f, target_dir / f.name)
+                    log_info(f"Copied {f.name} to {target_dir}")
+            else:
+                log_warning(f"Artifact not found: {pattern}")
                     
         return True
 

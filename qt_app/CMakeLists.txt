@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 # ------------------------------------------------------------
 # Find Qt6
 # ------------------------------------------------------------
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Concurrent)
 
 # ------------------------------------------------------------
 # Target: pdf_reader (Executable)
@@ -32,6 +32,8 @@ target_link_libraries(pdf_reader PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::PrintSupport
+    Qt6::Concurrent
     pdfium_wrapper
 )
 
@@ -59,11 +61,9 @@ elseif(APPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:pdfium_wrapper>"
             "$<TARGET_FILE_DIR:pdf_reader>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.dylib"
-            "$<TARGET_FILE_DIR:pdf_reader>"
         COMMENT "Copying runtime libraries to executable directory"
     )
+
 else()
     add_custom_command(TARGET pdf_reader POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

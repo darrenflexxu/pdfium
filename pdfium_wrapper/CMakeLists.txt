@@ -38,6 +38,12 @@ if(WIN32)
         VERSION ${PROJECT_VERSION}
     )
 elseif(APPLE)
+    target_link_libraries(pdfium_wrapper PRIVATE
+        "-framework CoreFoundation"
+        "-framework CoreGraphics"
+        "-framework Security"
+        "-framework Foundation"
+    )
     set_target_properties(pdfium_wrapper PROPERTIES
         SOVERSION ${PROJECT_VERSION_MAJOR}
         VERSION ${PROJECT_VERSION}
@@ -58,30 +64,10 @@ endif()
 # ------------------------------------------------------------
 # Copy PDFium runtime library to build output
 # ------------------------------------------------------------
-# The runtime DLLs are copied by the pdfium_build target's post-processing
-# But we also ensure they're copied to the wrapper output directory
-if(WIN32)
-    add_custom_command(TARGET pdfium_wrapper POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll"
-            $<TARGET_FILE_DIR:pdfium_wrapper>
-        COMMENT "Copying pdfium.dll to wrapper output directory"
-    )
-elseif(APPLE)
-    add_custom_command(TARGET pdfium_wrapper POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.dylib"
-            $<TARGET_FILE_DIR:pdfium_wrapper>
-        COMMENT "Copying libpdfium.dylib to wrapper output directory"
-    )
-else()
-    add_custom_command(TARGET pdfium_wrapper POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/third_party/pdfium/bin/libpdfium.so"
-            $<TARGET_FILE_DIR:pdfium_wrapper>
-        COMMENT "Copying libpdfium.so to wrapper output directory"
-    )
-endif()
+# When linking statically, the PDFium code is already bundled into the wrapper.
+# We only copy runtime DLLs if they are explicitly needed for shared build.
+# For now, since we use static linking on macOS, these are removed or conditional.
+# ------------------------------------------------------------
 
 # ------------------------------------------------------------
 # Install Headers
