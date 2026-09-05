@@ -2,6 +2,7 @@
 #define PDFIUM_EXT_COMPRESSION_H
 
 #include "fpdfview.h"
+#include "fpdf_save.h"
 
 #ifdef __cplusplus
 extern "C" {

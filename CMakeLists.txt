@@ -162,6 +162,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # ------------------------------------------------------------
 # Subdirectories
 # ------------------------------------------------------------
+add_subdirectory(pdfium_extensions)
 add_subdirectory(pdfium_wrapper)
 add_subdirectory(qt_app)
 

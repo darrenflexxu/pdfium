@@ -24,9 +24,8 @@ target_compile_definitions(pdfium_wrapper
         PDF_ENABLE_V8=0
 )
 
-# Link against PDFium INTERFACE library
-# This pulls in include directories and link libraries from the pdfium target
-target_link_libraries(pdfium_wrapper PRIVATE pdfium)
+# Link against PDFium and PDFium Extensions
+target_link_libraries(pdfium_wrapper PRIVATE pdfium pdfium_extensions)
 
 # Platform-specific link options
 if(WIN32)

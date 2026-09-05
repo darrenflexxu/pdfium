@@ -1,11 +1,15 @@
 #include "fpdf_ext_compression.h"
-#include "core/fpdfapi/fpdf_parser/include/cpdf_document.h"
-#include "core/fpdfapi/fpdf_parser/include/cpdf_stream.h"
-#include "core/fpdfapi/fpdf_parser/include/cpdf_dictionary.h"
-#include "core/fpdfapi/fpdf_page/include/cpdf_pageobject.h"
-#include "core/fpdfapi/fpdf_page/include/cpdf_imageobject.h"
-#include "core/fpdfapi/fpdf_font/include/cpdf_font.h"
-#include "third_party/zlib/zlib.h"
+#include "core/fpdfapi/parser/cpdf_document.h"
+#include "core/fpdfapi/parser/cpdf_stream.h"
+#include "core/fpdfapi/parser/cpdf_array.h"
+#include "core/fpdfapi/parser/cpdf_dictionary.h"
+#include "core/fpdfapi/page/cpdf_pageobject.h"
+#include "core/fpdfapi/page/cpdf_imageobject.h"
+#include "core/fpdfapi/font/cpdf_font.h"
+#include "core/fpdfapi/edit/cpdf_creator.h"
+#include "core/fpdfapi/page/cpdf_image.h"
+#include "fpdfsdk/cpdfsdk_helpers.h"
+#include "zlib.h"
 #include <vector>
 #include <map>
 #include <set>
@@ -28,11 +32,11 @@ void FPDF_CompressOptionsInit(FPDF_CompressOptions* options) {
 }
 
 static int CompressStream(CPDF_Stream* stream, int flags) {
-    if (!stream || stream->GetRawData().empty()) return 0;
+    if (!stream || stream->GetRawSize() == 0) return 0;
     
     if (flags & FPDF_COMPRESS_FLATE) {
-        const auto& raw_data = stream->GetRawData();
-        std::vector<unsigned char> compressed;
+        const auto& raw_data = stream->ReadAllRawData();
+        std::vector<uint8_t> compressed;
         compressed.resize(compressBound(raw_data.size()));
         
         uLongf dest_len = compressed.size();
@@ -41,8 +45,7 @@ static int CompressStream(CPDF_Stream* stream, int flags) {
         
         if (ret == Z_OK) {
             compressed.resize(dest_len);
-            stream->SetData(compressed.data(), compressed.size(), 
-                          std::make_unique<CPDF_FlateDecode>());
+            stream->SetData(compressed);
             return 1;
         }
     }
@@ -54,7 +57,7 @@ static void RemoveUnusedObjects(CPDF_Document* doc) {
     std::vector<uint32_t> to_visit;
     
     // Collect all referenced objects from trailer
-    CPDF_Dictionary* root = doc->GetRoot();
+    const CPDF_Dictionary* root = doc->GetRoot();
     if (root) to_visit.push_back(root->GetObjNum());
     
     // Traverse references
@@ -70,27 +73,29 @@ static void RemoveUnusedObjects(CPDF_Document* doc) {
         
         // Find all references in this object
         if (obj->IsDictionary()) {
-            CPDF_Dictionary* dict = obj->AsDictionary();
-            for (auto it = dict->GetDict().begin(); it != dict->GetDict().end(); ++it) {
-                if (it->second->IsReference()) {
-                    to_visit.push_back(it->second->GetObjNum());
+            const CPDF_Dictionary* dict = obj->AsDictionary();
+            auto keys = dict->GetKeys();
+            for (auto key : keys) {
+                auto obj = dict->GetObjectFor(key.AsStringView());
+                if (obj->IsReference()) {
+                    to_visit.push_back(obj->GetDict()->GetObjNum());
                 }
             }
         } else if (obj->IsArray()) {
-            CPDF_Array* array = obj->AsArray();
+            const CPDF_Array* array = obj->AsArray();
             for (size_t i = 0; i < array->size(); ++i) {
-                CPDF_Object* item = array->GetDirectObjectAt(i);
+                const CPDF_Object* item = array->GetObjectAt(i);
                 if (item && item->IsReference()) {
-                    to_visit.push_back(item->GetObjNum());
+                    to_visit.push_back(item->GetDirect()->GetObjNum());
                 }
             }
         }
     }
     
     // Remove unreferenced objects
-    for (const auto& pair : doc->GetAllIndirectObjects()) {
-        if (!referenced.count(pair.first)) {
-            doc->RemoveIndirectObject(pair.first);
+    for (auto ite = doc->begin() ; ite != doc->end(); ++ite) {
+        if (!referenced.count(ite->first)) {
+            doc->DeleteIndirectObject(ite->first);
             g_last_compress_stats.objects_removed++;
         }
     }
@@ -100,26 +105,31 @@ static int ProcessImages(CPDF_Document* doc, const FPDF_CompressOptions* options
     int processed = 0;
     
     for (int i = 0; i < doc->GetPageCount(); ++i) {
-        CPDF_Page* page = doc->GetPage(i);
-        if (!page) continue;
+        auto page_dict = doc->GetMutablePageDictionary(i);
         
-        CPDF_PageObject* obj = page->GetFirstObject();
-        while (obj) {
-            if (obj->GetType() == PDFPAGE_IMAGE) {
-                CPDF_ImageObject* img_obj = static_cast<CPDF_ImageObject*>(obj);
-                CPDF_Stream* stream = img_obj->GetImageStream();
+        if (!CPDF_Page::IsValidPageDictLoose(page_dict)) {
+            continue;
+        }
+        auto page = pdfium::MakeRetain<CPDF_Page>(doc, std::move(page_dict));
+        page->ParseContent();
+        
+        int page_obj_count = page->GetPageObjectCount();
+        for (int j = 0; j < page_obj_count; ++j) {
+            auto obj = page->GetPageObjectByIndex(j);
+            if (obj->GetType() == CPDF_PageObject::Type::kImage) {
+                CPDF_ImageObject* img_obj = obj->AsImage();
+                const CPDF_Stream* stream = img_obj->GetImage()->GetStream();
                 
                 if (stream && (options->flags & FPDF_COMPRESS_IMAGES)) {
                     // Check image DPI and downsample if needed
                     // This is a simplified version - real implementation would
                     // decode, resample, and re-encode the image
-                    if (CompressStream(stream, options->flags)) {
+                    if (CompressStream(const_cast<CPDF_Stream*>(stream), options->flags)) {
                         g_last_compress_stats.images_recompressed++;
                         processed++;
                     }
                 }
             }
-            obj = obj->GetNext();
         }
     }
     return processed;
@@ -139,7 +149,7 @@ FPDF_DOCUMENT FPDF_OptimizeDocument(
 ) {
     memset(&g_last_compress_stats, 0, sizeof(g_last_compress_stats));
     
-    CPDF_Document* doc = static_cast<CPDF_Document*>(document);
+    CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
     if (!doc) return nullptr;
     
     FPDF_CompressOptions opts;
@@ -151,10 +161,10 @@ FPDF_DOCUMENT FPDF_OptimizeDocument(
     
     // 1. Compress streams
     if (opts.flags & FPDF_COMPRESS_FLATE) {
-        for (const auto& pair : doc->GetAllIndirectObjects()) {
-            CPDF_Object* obj = pair.second.Get();
+        for (auto ite = doc->begin(); ite != doc->end(); ++ite) {
+            CPDF_Object* obj = ite->second.Get();
             if (obj && obj->IsStream()) {
-                CompressStream(obj->AsStream(), opts.flags);
+                CompressStream(const_cast<CPDF_Stream*>(obj->AsStream()), opts.flags);
             }
         }
     }
@@ -213,7 +223,7 @@ int FPDF_SaveWithCompression(
 ) {
     if (!document || !file_path) return 0;
     
-    CPDF_Document* doc = static_cast<CPDF_Document*>(document);
+    CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
     
     // Apply optimizations
     FPDF_OptimizeDocument(document, options, nullptr);
@@ -222,6 +232,9 @@ int FPDF_SaveWithCompression(
     FPDF_FILEWRITE file_write;
     file_write.version = 1;
     
-    // Use PDFium's built-in file writer
-    return doc->Save(file_path, FPDF_SAVE_DEFAULT);
+    
+//    CPDF_Creator creator(doc, );
+//    // Use PDFium's built-in file writer
+//    return doc->Save(file_path, FPDF_SAVE_DEFAULT);
+    return 0;
 }
