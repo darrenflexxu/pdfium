@@ -497,27 +497,36 @@ int FPDF_GetDocumentStructure(FPDF_DOCUMENT document, FPDF_DocumentStructure* ou
     CPDF_Document* doc = CPDFDocumentFromFPDFDocument(document);
     memset(out_info, 0, sizeof(FPDF_DocumentStructure));
     
+    // 1. Basic counts
     out_info->page_count = doc->GetPageCount();
-    //out_info->object_count = doc->GetAllIndirectObjects().size();
     
-//    for (int i = 0; i < doc->GetPageCount(); ++i) {
-//        CPDF_Page* page = doc->GetPage(i);
-//        if (!page) continue;
-//        
-//        CPDF_PageObject* obj = page->GetFirstObject();
-//        while (obj) {
-//            switch (obj->GetType()) {
-//                case CPDF_PageObject::Type::kImage: out_info->image_count++; break;
-//                case CPDF_PageObject::Type::kText: {
-//                    CPDF_TextObject* text_obj = static_cast<CPDF_TextObject*>(obj);
-//                    if (text_obj->GetFont()) out_info->font_count++;
-//                    break;
-//                }
-//            }
-//            obj = obj->GetNext();
-//        }
-//    }
+    // 2. Traverse all pages for resource counts
+    for (int i = 0; i < doc->GetPageCount(); ++i) {
+        auto page_dict = doc->GetMutablePageDictionary(i);
+        if (!page_dict) continue;
+        auto page = pdfium::MakeRetain<CPDF_Page>(doc, std::move(page_dict));
+        page->ParseContent();
+        
+        for (int j = 0; j < page->GetPageObjectCount(); ++j) {
+            auto obj = page->GetPageObjectByIndex(j);
+            switch (obj->GetType()) {
+                case CPDF_PageObject::Type::kImage: out_info->image_count++; break;
+                case CPDF_PageObject::Type::kText: 
+                    if (static_cast<CPDF_TextObject*>(obj)->GetFont()) out_info->font_count++;
+                    break;
+                case CPDF_PageObject::Type::kPath: 
+                    // path_count is not in FPDF_DocumentStructure, skipping
+                    break;
+                default: break;
+            }
+        }
+        
+        // Count annotations for this page
+        CPDF_AnnotList annots(page);
+        out_info->annotation_count += annots.Count();
+    }
     
+    // 3. Count Form Fields from root /AcroForm
     const CPDF_Dictionary* root = doc->GetRoot();
     if (root) {
         const CPDF_Dictionary* acro_form = root->GetDictFor("AcroForm");
@@ -527,25 +536,17 @@ int FPDF_GetDocumentStructure(FPDF_DOCUMENT document, FPDF_DocumentStructure* ou
         }
     }
     
-//    for (int i = 0; i < doc->GetPageCount(); ++i) {
-//        CPDF_Page* page = doc->GetPage(i);
-//        if (page) {
-//            CPDF_AnnotList annot_list(page);
-//            out_info->annotation_count += annot_list.GetAnnotCount();
-//        }
-//    }
-    
+    // 4. Metadata extraction
     const CPDF_Dictionary* info = doc->GetInfo();
     if (info) {
-        auto producer = info->GetStringFor("Producer")->GetString();
-        auto creator = info->GetStringFor("Creator")->GetString();
-        auto creation = info->GetStringFor("CreationDate")->GetString();
-        auto mod = info->GetStringFor("ModDate")->GetString();
-        
-        strncpy(out_info->producer, producer.c_str(), 255);
-        strncpy(out_info->creator, creator.c_str(), 255);
-        strncpy(out_info->creation_date, creation.c_str(), 63);
-        strncpy(out_info->mod_date, mod.c_str(), 63);
+        auto get_str = [&](const char* key) {
+            const CPDF_String* s = info->GetStringFor(key);
+            return s ? s->GetString() : "";
+        };
+        strncpy(out_info->producer, get_str("Producer").c_str(), 255);
+        strncpy(out_info->creator, get_str("Creator").c_str(), 255);
+        strncpy(out_info->creation_date, get_str("CreationDate").c_str(), 63);
+        strncpy(out_info->mod_date, get_str("ModDate").c_str(), 63);
     }
     
     return 1;
