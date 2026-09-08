@@ -94,7 +94,8 @@ private:
     QAction* m_zoomWidthAction = nullptr;
     QAction* m_rotateCwAction = nullptr;
     QAction* m_rotateCcwAction = nullptr;
-    
+    QAction* m_selectionToolAction = nullptr;
+
     // New feature actions
     QAction* m_compressAction = nullptr;
     QAction* m_elementInspectorAction = nullptr;

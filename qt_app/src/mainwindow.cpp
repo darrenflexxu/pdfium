@@ -159,7 +159,12 @@ void MainWindow::createActions() {
     m_rotateCcwAction->setShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_R);
     m_rotateCcwAction->setStatusTip(tr("Rotate page counterclockwise"));
     connect(m_rotateCcwAction, &QAction::triggered, m_viewer, &PdfViewerWidget::rotateCounterClockwise);
-    
+
+    m_selectionToolAction = new QAction(QIcon::fromTheme("edit-select"), tr("&Selection Tool"), this);
+    m_selectionToolAction->setCheckable(true);
+    m_selectionToolAction->setStatusTip(tr("Toggle between panning and text selection"));
+    connect(m_selectionToolAction, &QAction::toggled, m_viewer, &PdfViewerWidget::setTextSelectionEnabled);
+
     // Tools actions (new features)
     m_compressAction = new QAction(QIcon::fromTheme("document-compress"), tr("&Optimize PDF..."), this);
     m_compressAction->setShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_O);
@@ -302,14 +307,15 @@ void MainWindow::createToolBars() {
     QToolBar* viewToolBar = addToolBar(tr("View"));
     viewToolBar->setObjectName("viewToolBar");
     viewToolBar->addAction(m_zoomOutAction);
-    
+
     m_zoomLabel = new QLabel("100%");
     m_zoomLabel->setMinimumWidth(60);
     m_zoomLabel->setAlignment(Qt::AlignCenter);
     viewToolBar->addWidget(m_zoomLabel);
-    
+
     viewToolBar->addAction(m_zoomInAction);
     viewToolBar->addSeparator();
+    viewToolBar->addAction(m_selectionToolAction);
     viewToolBar->addAction(m_zoomFitAction);
     viewToolBar->addAction(m_zoomWidthAction);
     viewToolBar->addSeparator();
