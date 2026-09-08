@@ -19,6 +19,8 @@ endif()
 # PDFium Build Pipeline Integration
 # ------------------------------------------------------------
 option(BUILD_PDFIUM_FROM_SOURCE "Build PDFium from source using GN/Ninja" OFF)
+# Deprecated: pdfium_build_debug/pdfium_build_release/pdfium_build targets now
+# drive debug vs release; this option is retained only for cache compatibility.
 option(PDFIUM_BUILD_DEBUG "Build PDFium in debug mode" OFF)
 option(PDFIUM_ENABLE_XFA "Enable XFA support in PDFium" ON)
 option(PDFIUM_ENABLE_V8 "Enable V8 JavaScript engine in PDFium" OFF)
@@ -84,14 +86,23 @@ target_include_directories(pdfium
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/include>
 )
 
-# Platform-specific link libraries (resolved at build time)
+# PDFium library paths for different configurations
 if(WIN32)
-    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium.lib)
+    set(PDFIUM_LIB_RELEASE "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium.lib" CACHE FILEPATH "Path to release PDFium library")
+    set(PDFIUM_LIB_DEBUG "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium_debug.lib" CACHE FILEPATH "Path to debug PDFium library")
 elseif(APPLE)
-    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.a)
+    set(PDFIUM_LIB_RELEASE "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.a" CACHE FILEPATH "Path to release PDFium library")
+    set(PDFIUM_LIB_DEBUG "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium_debug.a" CACHE FILEPATH "Path to debug PDFium library")
 else()
-    target_link_libraries(pdfium INTERFACE ${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.so)
+    set(PDFIUM_LIB_RELEASE "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium.so" CACHE FILEPATH "Path to release PDFium library")
+    set(PDFIUM_LIB_DEBUG "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/libpdfium_debug.so" CACHE FILEPATH "Path to debug PDFium library")
 endif()
+
+# Platform-specific link libraries (resolved at build time)
+target_link_libraries(pdfium INTERFACE
+    $<$<CONFIG:Debug>:${PDFIUM_LIB_DEBUG}>
+    $<$<NOT:$<CONFIG:Debug>>:${PDFIUM_LIB_RELEASE}>
+)
 
 # ------------------------------------------------------------
 # PDFium External Project (build from source)
@@ -110,9 +121,6 @@ if(BUILD_PDFIUM_FROM_SOURCE)
     
     # Construct build arguments based on options
     set(PDFIUM_BUILD_ARGS "--target-os" ${PDFIUM_TARGET_OS} "--target-cpu" ${PDFIUM_TARGET_CPU})
-    if(PDFIUM_BUILD_DEBUG)
-        list(APPEND PDFIUM_BUILD_ARGS "--debug")
-    endif()
     if(NOT PDFIUM_ENABLE_XFA)
         list(APPEND PDFIUM_BUILD_ARGS "--no-xfa")
     endif()
@@ -131,13 +139,29 @@ if(BUILD_PDFIUM_FROM_SOURCE)
         VERBATIM
     )
     
-    # Custom target to build PDFium
-    add_custom_target(pdfium_build
-        COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT} ${PDFIUM_BUILD_ARGS}
+    # Debug / Release PDFium library builds. They extract to library names with
+    # a '_debug' suffix (libpdfium_debug.a) vs the plain release names, so both
+    # variants can coexist in third_party/pdfium/lib.
+    add_custom_target(pdfium_build_debug
+        COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT} ${PDFIUM_BUILD_ARGS} "--debug"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Building PDFium for ${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU}"
+        COMMENT "Building debug PDFium for ${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU}"
         DEPENDS pdfium_bootstrap
         VERBATIM
+    )
+
+    add_custom_target(pdfium_build_release
+        COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT} ${PDFIUM_BUILD_ARGS} "--release"
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Building release PDFium for ${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU}"
+        DEPENDS pdfium_bootstrap
+        VERBATIM
+    )
+
+    # Meta target: build both variants in one go.
+    add_custom_target(pdfium_build
+        DEPENDS pdfium_build_debug pdfium_build_release
+        COMMENT "Building both debug and release PDFium"
     )
     
     # The pdfium INTERFACE library depends on pdfium_build being complete

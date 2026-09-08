@@ -1,73 +1,56 @@
-# Implementation Plan: Advanced Text Selection (Linear Cursor & Box Selection)
+# 实现计划：PDFium Debug/Release 库版本自动切换
 
-## 1. 涉及修改的文件列表
+## 1. 需求背景
+目前项目在编译时仅链接一个 PDFium 静态库文件。为了在 Xcode 中进行高效调试，需要实现在 Debug 配置下链接带调试符号的 PDFium 库（以便 Step Into 源代码），而在 Release 配置下链接经过优化且无符号的 PDFium 库。
 
-- `qt_app/src/pdfdocument.h`: 定义 `CharInfo` 结构体以及页面级字符映射缓存 `m_charMaps`。
-- `qt_app/src/pdfdocument.cpp`: 实现字符坐标映射表的生成逻辑（Character Mapping）。
-- `qt_app/src/pdfviewerwidget.h`: 添加光标索引、选区索引范围及光标状态变量。
-- `qt_app/src/pdfviewerwidget.cpp`: 重构鼠标事件，实现点击定位光标、线性拖拽选择及精准的字符级高亮渲染。
+## 2. 涉及修改的文件列表
+- `build_scripts/build_pdfium.py`: 修改产物提取逻辑，区分命名。
+- `CMakeLists.txt`: 重构构建目标与链接逻辑。
 
-## 2. 具体执行步骤
+## 3. 具体执行步骤
 
-### 步骤 1: 构建字符级映射表 (`PdfDocument`)
-**目标**: 将 PDF 页面离散的元素转化为一个线性的、带有坐标信息的字符流。
+### 步骤 1: 修改 PDFium 产物提取逻辑 (`build_pdfium.py`)
+**目标**: 确保 Debug 和 Release 版本的库文件在提取到 `third_party/pdfium/lib` 时不会互相覆盖。
 
-1. **定义 `CharInfo` 结构**:
-   - 包含字符编码 (codepoint)、该字符的 PDF 坐标边界 (`QRectF bounds`) 以及它在页中的线性索引 (`int index`)。
-2. **实现 `generateCharMap(int pageIndex)`**:
-   - 遍历页面所有文本元素 $\rightarrow$ 提取字符串 $\rightarrow$ 基于字符宽度和位置估算每个字符的 `bounds`。
-   - 将所有字符按阅读顺序（先 Y 后 X）存入 `QVector<CharInfo>` 并缓存至 `m_charMaps`。
-3. **提供查询接口**:
-   - `int findNearestCharIndex(int pageIndex, const QPointF& pos)`: 根据 PDF 坐标查找距离最近的字符索引。
+- **修改点**: 在 `_extract_windows_artifacts`, `_extract_macos_artifacts`, `_extract_linux_artifacts` 函数中：
+    - 在复制主库文件（如 `libpdfium.a` 或 `pdfium.lib`）时，检查 `self.config.is_debug`。
+    - 如果是 Debug 版本，将目标文件名改为 `libpdfium_debug.a` / `pdfium_debug.lib`。
+    - 如果是 Release 版本，保持原名 `libpdfium.a` / `pdfium.lib`。
+- **校验方式**: 执行 `python3 build_scripts/build_pdfium.py --debug` 和 `python3 build_scripts/build_pdfium.py --release` 后，检查 `third_party/pdfium/lib/` 目录下同时存在 `libpdfium.a` 和 `libpdfium_debug.a`。
 
-**校验方式**: 打印页面的字符索引表，验证每个字符的坐标是否正确，且索引顺序与阅读顺序一致。
+### 步骤 2: 定义多配置库路径 (`CMakeLists.txt`)
+**目标**: 在 CMake 配置阶段定义两套不同的库路径。
 
-### 步骤 2: 实现光标定位与状态管理 (`PdfViewerWidget`)
-**目标**: 在视图中引入文本编辑器的“光标”概念。
+- **修改点**: 
+    - 定义 `PDFIUM_LIB_RELEASE` 变量，指向标准库路径。
+    - 定义 `PDFIUM_LIB_DEBUG` 变量，指向带 `_debug` 后缀的库路径。
+- **校验方式**: 运行 `cmake ..`，通过 `cmake-gui` 或命令行检查这两个缓存变量是否正确定义。
 
-1. **引入状态变量**:
-   - `int m_cursorIndex`: 当前光标所在的字符位置。
-   - `int m_selectionStart`: 选区起始索引。
-   - `int m_selectionEnd`: 选区结束索引。
-2. **更新 `mousePressEvent`**:
-   - 将点击点 $\rightarrow$ `mapToPage` $\rightarrow$ `findNearestCharIndex` $\rightarrow$ 更新 `m_cursorIndex`。
-   - 将 `m_selectionStart = m_selectionEnd = m_cursorIndex`。
-3. **更新 `mouseMoveEvent`**:
-   - 在拖拽时，实时更新 `m_selectionEnd` 为当前鼠标所在位置对应的字符索引。
+### 步骤 3: 创建分离的 PDFium 构建目标 (`CMakeLists.txt`)
+**目标**: 允许开发者通过 CMake 目标分别触发 Debug 和 Release 版本的 PDFium 编译。
 
-**校验方式**: 在界面上通过调试标签显示当前的 `m_cursorIndex`，验证点击不同字符时索引能正确跳转。
+- **修改点**:
+    - 将原有的单一 `pdfium_build` 目标拆分为 `pdfium_build_debug` 和 `pdfium_build_release`。
+    - `pdfium_build_debug` 调用 `build_pdfium.py --debug`。
+    - `pdfium_build_release` 调用 `build_pdfium.py --release`。
+    - 创建一个元目标 `pdfium_build`，使其依赖于上述两个目标，实现一次性生成两套库。
+- **校验方式**: 执行 `cmake --build . --target pdfium_build_debug`，验证是否生成了调试版库。
 
-### 步骤 3: 实现两种选择模式的混合渲染 (`PdfViewerWidget`)
-**目标**: 兼顾“线性光标选择”的精确度和“矩形框选”的便捷性。
+### 步骤 4: 实现配置感知链接 (`CMakeLists.txt`)
+**目标**: 使 Xcode 的 Build Configuration 决定链接哪个库。
 
-1. **视觉渲染 (`paintEvent`)**:
-   - **光标渲染**: 在 `m_cursorIndex` 对应字符的左边界绘制一条 1px 宽的垂直线（Caret）。
-   - **线性高亮**: 遍历 `CharMap`，将 `m_selectionStart` 和 `m_selectionEnd` 之间的所有字符通过 `mapFromPage` 转换为视图矩形并绘制。
-   - **框选 fallback**: 若用户在无文本区域拖拽，依然保留原有的半透明矩形覆盖层。
-2. **文本提取逻辑**:
-   - 根据 `[start, end]` 索引范围，直接从 `CharMap` 中拼接字符，无需再次进行区域过滤。
+- **修改点**:
+    - 使用 CMake 生成器表达式 (Generator Expressions) 修改 `pdfium` 接口库的链接指令：
+      `target_link_libraries(pdfium INTERFACE $<$<CONFIG:Debug>:${PDFIUM_LIB_DEBUG}> $<$<NOT:$<CONFIG:Debug>>:${PDFIUM_LIB_RELEASE}>)`
+- **校验方式**: 
+    1. 在 Xcode 中选择 **Debug** 方案 $\rightarrow$ 编译 $\rightarrow$ 使用 `otool -L` 或检查链接日志，确认链接的是 `libpdfium_debug.a`。
+    2. 在 Xcode 中选择 **Release** 方案 $\rightarrow$ 编译 $\rightarrow$ 确认链接的是 `libpdfium.a`。
 
-**校验方式**: 
-- 拖拽选择文本 $\rightarrow$ 验证高亮块精准包裹字符 $\rightarrow$ 跨行选择时，高亮应在行末折返至下一行行首。
-
-### 步骤 4: 增强交互细节 (UX)
-**目标**: 提供专业 PDF 阅读器的交互体验。
-
-1. **双击/三击扩展**:
-   - 双击 $\rightarrow$ 扩展选区至包含当前字符的整个单词。
-   - 三击 $\rightarrow$ 扩展选区至当前段落。
-2. **快捷键支持**:
-   - `Ctrl+A` $\rightarrow$ 选中全页文本索引 `[0, totalChars - 1]`。
-3. **清除逻辑**: 在点击空白区域时，保留光标位置但清除选区。
-
-**校验方式**: 执行双击/三击操作 $\rightarrow$ 验证选区范围自动扩展的准确性。
-
-## 3. 综合校验方案
+## 4. 综合校验方案
 
 | 测试场景 | 操作步骤 | 预期结果 |
 | :--- | :--- | :--- |
-| **精准点击** | 点击某个单词的第三个字符 | 光标准确落在该字符之前 |
-| **线性跨行选择** | 从第一行末尾拖拽到第二行开头 | 选中第一行剩余部分 $\rightarrow$ 换行 $\rightarrow$ 选中第二行起始部分 |
-| **视觉一致性** | 旋转/缩放页面 | 光标和字符高亮块依然紧贴文字，无漂移 |
-| **复制内容** | 线性选择 $\rightarrow$ `Ctrl+C` | 复制的字符串与视觉选中的字符序列完全一致 |
-| **边界处理** | 在页首或页尾点击 | 索引正确处理为 0 或 `totalChars`，不产生越界崩溃 |
+| **双版本产出** | 执行 `cmake --build . --target pdfium_build` | `lib/` 目录下同时存在 `.a` 和 `_debug.a` 文件 |
+| **Debug 符号验证** | Xcode 选择 Debug $\rightarrow$ 运行 $\rightarrow$ 在 PDFium 代码中打断点/单步执行 | 能够正常进入 PDFium 内部函数，变量值可见 |
+| **Release 优化验证** | Xcode 选择 Release $\rightarrow$ 编译 $\rightarrow$ 检查二进制大小 | 最终 App 体积较小，PDFium 部分无调试符号 |
+| **路径灵活性** | 修改 `PDFIUM_LIB_DEBUG` 变量路径 $\rightarrow$ 重新编译 | 编译器正确使用新路径下的库文件 |

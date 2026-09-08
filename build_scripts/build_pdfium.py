@@ -253,6 +253,19 @@ class PDFiumBuilder:
         else:
             return self._extract_linux_artifacts(lib_dir, bin_dir)
 
+    def _artifact_name(self, fname: str) -> str:
+        """Return the destination name for a built artifact.
+
+        Debug builds get a '_debug' suffix on library files so they never
+        overwrite the release variants in third_party/pdfium/lib|bin. Release
+        builds keep their plain names; non-library executables are unchanged."""
+        if not self.config.is_debug:
+            return fname
+        stem, ext = os.path.splitext(fname)
+        if ext.lower() in (".a", ".lib", ".so", ".dylib", ".dll"):
+            return f"{stem}_debug{ext}"
+        return fname
+
     def _extract_windows_artifacts(self, lib_dir: Path, bin_dir: Path) -> bool:
         """Extract Windows artifacts (.lib, .dll)"""
         # Find the built files
@@ -265,8 +278,9 @@ class PDFiumBuilder:
             found = list(self.build_dir.rglob(pattern))
             if found:
                 for f in found:
-                    shutil.copy2(f, dst_dir / f.name)
-                    log_info(f"Copied {f.name} to {dst_dir}")
+                    name = self._artifact_name(f.name)
+                    shutil.copy2(f, dst_dir / name)
+                    log_info(f"Copied {f.name} -> {name} to {dst_dir}")
             else:
                 log_warning(f"Artifact not found: {pattern}")
                 
@@ -286,8 +300,9 @@ class PDFiumBuilder:
                 for f in found:
                     # Prefer lib_dir for static libs and dylibs to keep pdfium_wrapper happy
                     target_dir = lib_dir if (f.suffix == ".a" or f.suffix == ".dylib") else dst_dir
-                    shutil.copy2(f, target_dir / f.name)
-                    log_info(f"Copied {f.name} to {target_dir}")
+                    name = self._artifact_name(f.name)
+                    shutil.copy2(f, target_dir / name)
+                    log_info(f"Copied {f.name} -> {name} to {target_dir}")
             else:
                 log_warning(f"Artifact not found: {pattern}")
                     
@@ -305,8 +320,9 @@ class PDFiumBuilder:
             found = list(self.build_dir.rglob(pattern))
             if found:
                 for f in found:
-                    shutil.copy2(f, dst_dir / f.name)
-                    log_info(f"Copied {f.name} to {dst_dir}")
+                    name = self._artifact_name(f.name)
+                    shutil.copy2(f, dst_dir / name)
+                    log_info(f"Copied {f.name} -> {name} to {dst_dir}")
                     
         return True
 
@@ -449,7 +465,9 @@ def main():
         configs = get_supported_configs()
         configs_to_build = configs.get("native", [])
     elif args.target_os and args.target_cpu:
-        is_debug = args.debug if args.debug else False
+        # --debug and --release are mutually exclusive selectors; the default
+        # (neither flag) is a release build.
+        is_debug = args.debug and not args.release
         configs_to_build = [BuildConfig(
             target_os=args.target_os,
             target_cpu=args.target_cpu,

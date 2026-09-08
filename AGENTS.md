@@ -21,6 +21,12 @@ cmake -DBUILD_PDFIUM_FROM_SOURCE=ON ..
 cmake --build . --target pdfium_build
 ```
 
+Debug/Release libraries are extracted side-by-side (`libpdfium_debug.a` + `libpdfium.a`); Xcode links per Build Configuration via generator expressions. To build only one variant:
+```bash
+cmake --build . --target pdfium_build_debug     # --debug
+cmake --build . --target pdfium_build_release   # --release
+```
+
 ### PDFium Utility Targets
 - `pdfium_bootstrap`: Install `depot_tools` and sync source.
 - `pdfium_clean`: Remove PDFium build artifacts.
