@@ -34,6 +34,7 @@ cmake --build . --target pdfium_build
 - **Async Rendering**: `PdfDocument::requestRender()` uses `QtConcurrent`. Results via `renderFinished`.
 - **Color Conversion**: PDFium outputs **BGRA** $\rightarrow$ `PdfDocument` converts to **ARGB**.
 - **Caching**: `PdfViewerWidget` caches last 10 pages (key: page+size+rotation).
+- **Text Selection**: `PdfDocument` builds a per-page `CharInfo` map (reading order = top-down line clustering by vertical overlap, then left-right) via wrapper `GetCharCount/GetCharUnicode/GetCharBox`. `findNearestCharIndex` resolves clicks (y-up page space). `PdfViewerWidget` stores `m_cursorIndex`/`m_selectionStart/End`; linear char highlight + 1px caret drawn via `mapRectFromPage`; no-text pages fall back to a box overlay. Double-click word, triple-click paragraph (`wordRange`/`paragraphRange`), `Ctrl+A`/`Ctrl+C`.
 - **Cross-Compile**: Use `PDFIUM_TARGET_OS` and `PDFIUM_TARGET_CPU` (e.g., `win`, `mac`, `linux` | `x64`, `arm64`, `arm`).
 - **Runtime lib name**: On macOS the DLL is `libpdfium_wrapper.dylib`, on Linux `libpdfium_wrapper.so`, on Windows `pdfium_wrapper.dll` (selected via `#ifdef` in `PdfDocument::Private::loadLibrary()`).
 
