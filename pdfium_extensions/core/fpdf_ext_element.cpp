@@ -346,15 +346,36 @@ int FPDF_SearchTextEx(
         if (index < start_index) continue;
         
         double x1, y1, x2, y2;
-        //FPDFText_GetSchResultRect(handle, &x1, &y1, &x2, &y2);
+        // Use FPDFText_GetCharBox for the first character of the match as a proxy for the rect
+        if (FPDFText_GetCharBox(fpdf_text_page, index, &x1, &x2, &y1, &y2)) {
+            out_matches[found].bounds[0] = x1;
+            out_matches[found].bounds[1] = y1;
+            out_matches[found].bounds[2] = x2;
+            out_matches[found].bounds[3] = y2;
+        } else {
+            out_matches[found].bounds[0] = 0;
+            out_matches[found].bounds[1] = 0;
+            out_matches[found].bounds[2] = 0;
+            out_matches[found].bounds[3] = 0;
+        }
         
-        out_matches[found].bounds[0] = x1;
-        out_matches[found].bounds[1] = y1;
-        out_matches[found].bounds[2] = x2;
-        out_matches[found].bounds[3] = y2;
         out_matches[found].char_index = index;
         out_matches[found].element_index = -1;
         out_matches[found].element = nullptr;
+        
+        // Map index to element using FPDFText_GetTextObject
+        FPDF_PAGEOBJECT page_obj = FPDFText_GetTextObject(fpdf_text_page, index);
+        if (page_obj) {
+            // Now we need to find which FPDF_PageElement this corresponds to.
+            // We can iterate through page objects.
+            for (int i = 0; i < pdfium_page->GetPageObjectCount(); ++i) {
+                if (pdfium_page->GetPageObjectByIndex(i) == reinterpret_cast<CPDF_PageObject*>(page_obj)) {
+                    out_matches[found].element_index = i;
+                    out_matches[found].element = FPDF_GetPageElement(page, i);
+                    break;
+                }
+            }
+        }
         
         found++;
     }
