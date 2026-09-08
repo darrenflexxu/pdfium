@@ -44,11 +44,18 @@ public:
     
     // Text selection (future)
     void setTextSelectionEnabled(bool enabled);
+
+    // Linear text-selection state (char map indices).
+    int cursorCharIndex() const { return m_cursorIndex; }
+    int selectionStart() const { return m_selectionStart; }
+    int selectionEnd() const { return m_selectionEnd; }
+    bool isSelecting() const { return m_selecting; }
     
     // Coordinate mapping (PDF page space <-> widget pixels, rotation-aware)
     QPoint mapFromPage(const QPointF& pagePos) const;
     QPointF mapToPage(const QPoint& widgetPos) const;
     QRectF mapRectFromPage(const QRectF& pdfRect) const;
+    QRectF pageRect() const;
     
 signals:
     void pageChanged(int pageIndex);
@@ -76,9 +83,9 @@ private slots:
 private:
     void updateViewport();
     void requestRender();
-    QRectF pageRect() const;
     QPointF mapFromPageF(const QPointF& pagePos) const;
     QRectF mappedMatchRect(const QRectF& pageMatch) const;
+    void clearTextSelectionState();
     
     PdfDocument* m_document = nullptr;
     QImage m_currentImage;
@@ -92,11 +99,21 @@ private:
     QPoint m_scrollOffset;
     bool m_panning = false;
     
-    // Text selection
+    // Text selection. The char-index pair drives the linear caret/highlight;
+    // the box fields are the fallback overlay for pages with no text at all.
     bool m_textSelectionEnabled = false;
-    QPoint m_selectionStart;
-    QPoint m_selectionEnd;
+    int m_cursorIndex = -1;
+    int m_selectionStart = -1;
+    int m_selectionEnd = -1;
     bool m_selecting = false;
+    QPoint m_boxSelStart;
+    QPoint m_boxSelEnd;
+
+    // Multi-click detection (double/triple click on a char).
+    int m_clickCount = 1;
+    qint64 m_lastClickTime = 0;
+    QPointF m_lastClickPagePos;
+    int m_lastClickIndex = -1;
     
     // Render cache
     struct CachedPage {

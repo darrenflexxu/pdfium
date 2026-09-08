@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QRectF>
 #include <QMutexLocker>
+#include <algorithm>
 #include <pdfium_wrapper.h>
 
 // PIMPL for DLL binding. Only the factory function is resolved at runtime;
@@ -114,6 +115,7 @@ bool PdfDocument::load(const QString& filePath, const QString& password) {
     m_currentSearchTerm.clear();
     m_searchMatches.clear();
     m_currentMatchIndex = -1;
+    m_charMaps.clear();
     emit pageCountChanged(m_pageCount);
     emit loadFinished(true, "");
     return true;
@@ -128,6 +130,7 @@ void PdfDocument::close() {
     m_currentSearchTerm.clear();
     m_searchMatches.clear();
     m_currentMatchIndex = -1;
+    m_charMaps.clear();
 }
 
 int PdfDocument::pageCount() const {
@@ -282,6 +285,213 @@ QList<QRectF> PdfDocument::searchText(int pageIndex, const QString& text, bool c
 
     page->Release();
     return results;
+}
+
+const QVector<CharInfo>& PdfDocument::charMap(int pageIndex) const {
+    static const QVector<CharInfo> empty;
+    auto it = m_charMaps.constFind(pageIndex);
+    if (it != m_charMaps.constEnd()) return it.value();
+    if (!m_interface) return empty;
+
+    IPdfPage* page = m_interface->GetPage(pageIndex);
+    if (!page) return empty;
+
+    QVector<CharInfo> map;
+    const int count = page->GetCharCount();
+    map.reserve(qMax(0, count));
+    for (int i = 0; i < count; ++i) {
+        double l = 0, t = 0, r = 0, b = 0;
+        page->GetCharBox(i, &l, &t, &r, &b);
+        CharInfo ci;
+        ci.codepoint = page->GetCharUnicode(i);
+        ci.bounds = QRectF(QPointF(l, t), QPointF(r, b)).normalized();
+        ci.index = i;
+        // Skip zero-area glyphs (e.g. PDFium's injected CR/LF control chars
+        // and other whitespace placeholders): they carry no selectable width
+        // and would corrupt the contiguous codepoint sequence.
+        if (ci.bounds.width() <= 0.0 || ci.bounds.height() <= 0.0) continue;
+        map.append(ci);
+    }
+    page->Release();
+
+    if (!map.isEmpty()) {
+        // CharInfo::bounds live in PDF user space (bottom-left origin, y-up),
+        // the exact convention FPDFText_GetCharBox / PageToDevice use, so
+        // bounds.top() is a glyph's LOWER edge (toward page bottom) and
+        // bounds.bottom() its UPPER edge (toward page top).
+        //
+        // Reading order: top-to-bottom, then left-to-right within a line.
+        // PDFium reports per-glyph box edges that differ slightly within a
+        // line (descender/ascender glyphs get taller boxes), so lines are
+        // delimited by VERTICAL OVERLAP: two glyphs are on the same line iff
+        // their boxes' vertical ranges overlap (they share a baseline row).
+        // Walking glyphs from the top of the page down (descending upper
+        // edge) yields reading-ordered line numbers.
+        std::stable_sort(map.begin(), map.end(),
+                         [](const CharInfo& a, const CharInfo& b) {
+                             return a.bounds.bottom() > b.bounds.bottom();
+                         });
+        int line = -1;
+        double lineTop = qInf();      // lowest lower-edge of current line
+        double lineBottom = -qInf();  // highest upper-edge of current line
+        for (CharInfo& ci : map) {
+            const double lo = ci.bounds.top();
+            const double hi = ci.bounds.bottom();
+            if (lo <= lineBottom + 0.25 && hi >= lineTop - 0.25) {
+                lineTop = qMin(lineTop, lo);
+                lineBottom = qMax(lineBottom, hi);
+            } else {
+                ++line;
+                lineTop = lo;
+                lineBottom = hi;
+            }
+            ci.line = line;
+        }
+        std::stable_sort(map.begin(), map.end(),
+                         [](const CharInfo& a, const CharInfo& b) {
+                             if (a.line != b.line) return a.line < b.line;
+                             return a.bounds.left() < b.bounds.left();
+                         });
+    }
+
+    m_charMaps.insert(pageIndex, map);
+    auto cachedIt = m_charMaps.constFind(pageIndex);
+    return cachedIt.value();
+}
+
+int PdfDocument::findNearestCharIndex(int pageIndex, const QPointF& pos) const {
+    const QVector<CharInfo>& map = charMap(pageIndex);
+    const int total = map.size();
+    if (total == 0) return -1;
+
+    // Contiguous per-line ranges in the sorted map.
+    struct L { int start; int end; double top; double bottom; };
+    QVector<L> lines;
+    for (int i = 0; i < total; ) {
+        int j = i;
+        double top = map[i].bounds.top(), bottom = map[i].bounds.bottom();
+        while (j + 1 < total && map[j + 1].line == map[i].line) {
+            ++j;
+            top = qMin(top, map[j].bounds.top());
+            bottom = qMax(bottom, map[j].bounds.bottom());
+        }
+        lines.append({i, j + 1, top, bottom});
+        i = j + 1;
+    }
+
+    // Vertical targeting: the band containing pos, or the nearest band edge.
+    // pos is in PDF user space (y-up): ABOVE the first line -> caret 0,
+    // below the last line -> charCount (plan's boundary behavior).
+    int lineIdx = 0;
+    const int lastLine = lines.size() - 1;
+    if (pos.y() >= lines[0].bottom) {
+        return 0;
+    }
+    if (pos.y() <= lines[lastLine].top) {
+        return total;
+    }
+    for (int i = 0; i <= lastLine; ++i) {
+        const L& ln = lines[i];
+        if (pos.y() >= ln.top && pos.y() <= ln.bottom) { lineIdx = i; break; }
+        if (i < lastLine) {
+            const L& nx = lines[i + 1];
+            // Gap band between two lines (upper edge of the higher line down
+            // to the lower edge of the next line).
+            if (pos.y() > ln.bottom && pos.y() < nx.top) {
+                lineIdx =
+                    (ln.bottom - pos.y() <= pos.y() - nx.top) ? i : i + 1;
+                break;
+            }
+        }
+    }
+
+    // Horizontal targeting: caret boundary within the line (left/right half).
+    const int s = lines[lineIdx].start, e = lines[lineIdx].end;
+    for (int i = s; i < e; ++i) {
+        const CharInfo& c = map[i];
+        const double mid = (c.bounds.left() + c.bounds.right()) * 0.5;
+        if (pos.x() < mid) return i;
+        if (pos.x() <= c.bounds.right()) return i + 1;
+    }
+    return e;
+}
+
+QString PdfDocument::textForRange(int pageIndex, int startIndex, int endIndex) const {
+    const QVector<CharInfo>& map = charMap(pageIndex);
+    if (map.isEmpty()) return QString();
+    const int a = qMax(0, qMin(startIndex, endIndex));
+    const int b = qMin(static_cast<int>(map.size()), qMax(startIndex, endIndex));
+    if (a >= b) return QString();
+    QString out;
+    out.reserve(b - a);
+    for (int i = a; i < b; ++i) {
+        const uint cp = static_cast<uint>(map[i].codepoint);
+        out += QString::fromUcs4(&cp, 1);
+    }
+    return out;
+}
+
+QPair<int, int> PdfDocument::wordRange(int pageIndex, int anchor) const {
+    const QVector<CharInfo>& map = charMap(pageIndex);
+    if (map.isEmpty() || anchor < 0 || anchor >= map.size())
+        return qMakePair(qMax(0, anchor), qMax(0, anchor));
+    const auto isWordChar = [](int cp) {
+        const QChar c(static_cast<ushort>(cp));
+        return !c.isSpace() && !c.isPunct();
+    };
+    const int line = map[anchor].line;
+    if (!isWordChar(map[anchor].codepoint)) {
+        // Anchor on whitespace: select the whitespace run itself.
+        int a = anchor, b = anchor + 1;
+        while (a > 0 && map[a - 1].line == line && !isWordChar(map[a - 1].codepoint)) --a;
+        while (b < map.size() && map[b].line == line && !isWordChar(map[b].codepoint)) ++b;
+        return qMakePair(a, b);
+    }
+    int a = anchor, b = anchor;
+    while (a > 0 && map[a - 1].line == line && isWordChar(map[a - 1].codepoint)) --a;
+    while (b < map.size() && map[b].line == line && isWordChar(map[b].codepoint)) ++b;
+    return qMakePair(a, b);
+}
+
+QPair<int, int> PdfDocument::paragraphRange(int pageIndex, int anchor) const {
+    const QVector<CharInfo>& map = charMap(pageIndex);
+    if (map.isEmpty() || anchor < 0 || anchor >= map.size())
+        return qMakePair(qMax(0, anchor), qMax(0, anchor));
+
+    QVector<QPair<int, int>> spans;   // [start, end) per line
+    QVector<double> tops, bottoms;
+    for (int i = 0; i < map.size(); ) {
+        int j = i;
+        while (j + 1 < map.size() && map[j + 1].line == map[i].line) ++j;
+        spans.append(qMakePair(i, j + 1));
+        tops.append(map[i].bounds.top());
+        bottoms.append(map[j].bounds.bottom());
+        i = j + 1;
+    }
+
+    // Median line pitch; a paragraph break is a gap well beyond the pitch.
+    double pitch = 0;
+    QVector<double> gaps;
+    for (int k = 1; k < tops.size(); ++k) gaps.append(tops[k] - tops[k - 1]);
+    if (!gaps.isEmpty()) {
+        QVector<double> sorted = gaps;
+        std::sort(sorted.begin(), sorted.end());
+        pitch = sorted[sorted.size() / 2];
+    }
+    const double threshold = qMax(2.0, pitch * 1.4);
+
+    const int k0 = map[anchor].line;
+    int first = k0;
+    for (int k = k0 - 1; k >= 0; --k) {
+        if (tops[k + 1] - bottoms[k] > threshold) break;
+        first = k;
+    }
+    int last = k0;
+    for (int k = k0 + 1; k < spans.size(); ++k) {
+        if (tops[k] - bottoms[k - 1] > threshold) break;
+        last = k;
+    }
+    return qMakePair(spans[first].first, spans[last].second);
 }
 
 void PdfDocument::startSearch(const QString& text, bool caseSensitive) {

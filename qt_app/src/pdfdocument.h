@@ -9,6 +9,9 @@
 #include <QThread>
 #include <QFuture>
 #include <QFutureWatcher>
+#include <QMap>
+#include <QPair>
+#include <QVector>
 #include <memory>
 #include "pdfium_wrapper.h"
 
@@ -16,6 +19,18 @@
 struct PdfElementInfo {
     PDF_ElementType type = PDF_ELEMENT_UNKNOWN;
     QRectF bounds;
+};
+
+// A single character in reading order (top-to-bottom, then left-to-right).
+// `bounds` are in PDF page coordinates (top-left origin, y-down), the same
+// convention used by PageToDevice/DeviceToPage and the rendered bitmap.
+// `index` is the stable linear selection index; `line` is the reading-order
+// line group this char belongs to (0 = first line).
+struct CharInfo {
+    int codepoint = 0;
+    QRectF bounds;
+    int index = 0;
+    int line = 0;
 };
 
 class PdfDocument : public QObject {
@@ -50,6 +65,21 @@ public:
     // Text extraction
     QString getPageText(int pageIndex) const;
     QList<QRectF> searchText(int pageIndex, const QString& text, bool caseSensitive = false);
+
+    // Character map (linear text selection). Lazily built per page and cached;
+    // chars are sorted in reading order (top-to-bottom, then left-to-right).
+    const QVector<CharInfo>& charMap(int pageIndex) const;
+    // Returns the caret index in [0, charCount] for a click position in page
+    // coordinates: above the first line -> 0, below the last line -> charCount,
+    // otherwise the nearest character boundary. Returns -1 when the page has no
+    // text.
+    int findNearestCharIndex(int pageIndex, const QPointF& pos) const;
+    // Codepoints from `startIndex` (inclusive) to `endIndex` (exclusive).
+    QString textForRange(int pageIndex, int startIndex, int endIndex) const;
+    // Selection expansion helpers (step 4). Ranges are [start, end), anchored
+    // on a character index; degenerate when the page has no text.
+    QPair<int, int> wordRange(int pageIndex, int anchor) const;
+    QPair<int, int> paragraphRange(int pageIndex, int anchor) const;
 
     // Document-wide search session
     void startSearch(const QString& text, bool caseSensitive);
@@ -121,6 +151,9 @@ private:
     // Cached page count
     int m_pageCount = 0;
     mutable QMutex m_mutex;
+
+    // Per-page cached character maps (reading-order linear text indices).
+    mutable QMap<int, QVector<CharInfo>> m_charMaps;
 };
 
 Q_DECLARE_OPERATORS_FOR_FLAGS(PdfDocument::CompressFlags)

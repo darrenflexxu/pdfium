@@ -51,6 +51,10 @@ third_party/pdfium/lib/*.lib
 third_party/pdfium/include/
 !third_party/pdfium/include/.gitkeep
 
+# PDFium SDK source + depot_tools (downloaded/synced by bootstrap scripts)
+depot_tools/
+third_party/pdfium/
+
 # Distribution
 *.zip
 *.tar.gz

@@ -32,6 +32,7 @@ void PdfViewerWidget::setDocument(PdfDocument* document) {
     m_currentImage = QImage();
     m_renderCache.clear();
     m_scrollOffset = QPoint(0, 0);
+    clearTextSelectionState();
     
     if (m_document) {
         connect(m_document, &PdfDocument::renderFinished, this, &PdfViewerWidget::onRenderFinished);
@@ -53,6 +54,7 @@ void PdfViewerWidget::setPage(int pageIndex) {
     
     m_currentPage = pageIndex;
     m_scrollOffset = QPoint(0, 0);
+    clearTextSelectionState();
     requestRender();
     emit pageChanged(m_currentPage);
 }
@@ -152,10 +154,19 @@ void PdfViewerWidget::rotateCounterClockwise() {
 void PdfViewerWidget::setTextSelectionEnabled(bool enabled) {
     m_textSelectionEnabled = enabled;
     if (!enabled) {
-        m_selecting = false;
-        m_selectionStart = m_selectionEnd = QPoint();
+        clearTextSelectionState();
         update();
     }
+}
+
+void PdfViewerWidget::clearTextSelectionState() {
+    m_selecting = false;
+    m_cursorIndex = -1;
+    m_selectionStart = -1;
+    m_selectionEnd = -1;
+    m_boxSelStart = m_boxSelEnd = QPoint();
+    m_clickCount = 1;
+    m_lastClickIndex = -1;
 }
 
 void PdfViewerWidget::paintEvent(QPaintEvent* event) {
@@ -210,11 +221,41 @@ void PdfViewerWidget::paintEvent(QPaintEvent* event) {
     }
     
     // Draw text selection
-    if (m_selecting && !m_selectionStart.isNull() && !m_selectionEnd.isNull()) {
-        QRect selRect = QRect(m_selectionStart, m_selectionEnd).normalized();
-        painter.fillRect(selRect, QColor(0, 120, 215, 100));
-        painter.setPen(QPen(QColor(0, 120, 215), 1, Qt::DashLine));
-        painter.drawRect(selRect);
+    if (m_textSelectionEnabled && m_document && m_document->isLoaded() &&
+        m_currentPage >= 0) {
+        const QVector<CharInfo>& cm = m_document->charMap(m_currentPage);
+        const int a = qMin(m_selectionStart, m_selectionEnd);
+        const int b = qMax(m_selectionStart, m_selectionEnd);
+        if (a >= 0 && b > a && a < cm.size()) {
+            const int hi = qMin(b, (int)cm.size());
+            for (int i = a; i < hi; ++i) {
+                QRectF mapped = mapRectFromPage(cm[i].bounds);
+                if (mapped.isEmpty()) continue;
+                painter.fillRect(mapped, QColor(0, 120, 215, 90));
+            }
+        }
+        // Box fallback overlay (pages with no selectable text at all).
+        if (m_selecting && !m_boxSelStart.isNull() && !m_boxSelEnd.isNull()) {
+            QRect selRect = QRect(m_boxSelStart, m_boxSelEnd).normalized();
+            painter.fillRect(selRect, QColor(0, 120, 215, 100));
+            painter.setPen(QPen(QColor(0, 120, 215), 1, Qt::DashLine));
+            painter.drawRect(selRect);
+        }
+        // Caret: a 1px vertical line at the left edge of the char that follows
+        // the caret index (right edge of the last char when at the end).
+        if (m_cursorIndex >= 0 && !cm.isEmpty()) {
+            QRectF cb;
+            if (m_cursorIndex < cm.size()) {
+                cb = cm[m_cursorIndex].bounds;
+            } else {
+                cb = cm.last().bounds;
+                cb.setLeft(cb.right());
+            }
+            const QPointF p1 = mapFromPageF(QPointF(cb.left(), cb.top()));
+            const QPointF p2 = mapFromPageF(QPointF(cb.left(), cb.bottom()));
+            painter.setPen(QPen(QColor(255, 80, 80), 1));
+            painter.drawLine(p1, p2);
+        }
     }
     
     // Page indicator
@@ -247,12 +288,56 @@ void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
 
 void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
-        if (m_textSelectionEnabled && !m_currentImage.isNull()) {
-            // Check if click is on page
+        if (m_textSelectionEnabled && m_document && m_document->isLoaded() &&
+            m_currentPage >= 0) {
             QRectF pRect = pageRect();
             if (pRect.contains(event->pos())) {
+                QPointF pagePos = mapToPage(event->pos());
+                int idx = m_document->findNearestCharIndex(m_currentPage, pagePos);
+
+                // Multi-click detection for word/paragraph expansion (step 4).
+                // Synthetic and real double-clicks both arrive as
+                // MouseButtonDblClick; relying on the timestamp heuristic is
+                // unreliable for synthesized events.
+                const bool multiClick =
+                    event->type() == QEvent::MouseButtonDblClick;
+                m_lastClickTime = event->timestamp();
+                m_lastClickPagePos = pagePos;
+                if (multiClick && m_lastClickIndex == idx) {
+                    ++m_clickCount;
+                } else {
+                    m_clickCount = 1;
+                }
+                m_lastClickIndex = idx;
                 m_selecting = true;
-                m_selectionStart = m_selectionEnd = event->pos();
+
+                if (idx >= 0 && m_document->charMap(m_currentPage).size() > 0) {
+                    m_cursorIndex = idx;
+                    m_selectionStart = m_selectionEnd = idx;
+                    m_boxSelStart = m_boxSelEnd = QPoint();
+
+                    // Word / paragraph expansion on multi-click (step 4).
+                    if (m_clickCount == 2) {
+                        const QPair<int, int> wr =
+                            m_document->wordRange(m_currentPage, idx);
+                        m_selectionStart = wr.first;
+                        m_selectionEnd = wr.second;
+                        m_cursorIndex = wr.second;
+                    } else if (m_clickCount == 3) {
+                        const QPair<int, int> pr =
+                            m_document->paragraphRange(m_currentPage, idx);
+                        m_selectionStart = pr.first;
+                        m_selectionEnd = pr.second;
+                        m_cursorIndex = pr.second;
+                    }
+                } else {
+                    // Page with no selectable text: keep the caret, clear the
+                    // char selection, start the box-fallback overlay instead.
+                    m_cursorIndex = -1;
+                    m_selectionStart = m_selectionEnd = -1;
+                    m_boxSelStart = m_boxSelEnd = event->pos();
+                }
+                emit statusMessage(QString("Caret index: %1").arg(m_cursorIndex));
                 update();
                 event->accept();
                 return;
@@ -281,7 +366,15 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         update();
         event->accept();
     } else if (m_selecting) {
-        m_selectionEnd = event->pos();
+        QPointF pagePos = mapToPage(event->pos());
+        if (m_document && m_currentPage >= 0) {
+            const int idx = m_document->findNearestCharIndex(m_currentPage, pagePos);
+            if (idx >= 0) {
+                m_selectionEnd = idx;
+                m_cursorIndex = idx;
+            }
+        }
+        m_boxSelEnd = event->pos();
         update();
         event->accept();
     }
@@ -295,17 +388,17 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
             event->accept();
         } else if (m_selecting) {
             m_selecting = false;
-            // Extract selected text
-            if (m_document && !m_selectionStart.isNull() && !m_selectionEnd.isNull()) {
-                QRectF selRect = QRectF(m_selectionStart, m_selectionEnd).normalized();
-                QRectF pRect = pageRect();
-                
-                // Convert widget coordinates to page coordinates (points)
-                // This is simplified - would need proper coordinate mapping
-                QString selectedText = m_document->getPageText(m_currentPage);
+            // Extract selected text from the char-index range.
+            const int a = qMin(m_selectionStart, m_selectionEnd);
+            const int b = qMax(m_selectionStart, m_selectionEnd);
+            if (m_document && m_currentPage >= 0 && a >= 0 && b > a) {
+                QString selectedText = m_document->textForRange(m_currentPage, a, b);
                 if (!selectedText.isEmpty()) {
                     emit textSelected(selectedText);
                     QApplication::clipboard()->setText(selectedText);
+                    emit statusMessage(QString("Selected %1 chars: %2")
+                                           .arg(b - a)
+                                           .arg(selectedText.simplified()));
                 }
             }
             update();
@@ -356,10 +449,33 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
             break;
         case Qt::Key_C:
             if (event->modifiers() & Qt::ControlModifier && m_textSelectionEnabled) {
-                QString text = m_document->getPageText(m_currentPage);
+                const int a = qMin(m_selectionStart, m_selectionEnd);
+                const int b = qMax(m_selectionStart, m_selectionEnd);
+                QString text;
+                if (m_document && a >= 0 && b > a) {
+                    text = m_document->textForRange(m_currentPage, a, b);
+                }
+                if (text.isEmpty()) {
+                    // Fallback: whole page.
+                    text = m_document->getPageText(m_currentPage);
+                }
                 if (!text.isEmpty()) {
                     QApplication::clipboard()->setText(text);
-                    emit statusMessage("Page text copied to clipboard");
+                    emit statusMessage("Selection copied to clipboard");
+                }
+            }
+            break;
+        case Qt::Key_A:
+            if (event->modifiers() & Qt::ControlModifier && m_textSelectionEnabled) {
+                if (m_document && m_currentPage >= 0) {
+                    const QVector<CharInfo>& cm = m_document->charMap(m_currentPage);
+                    if (!cm.isEmpty()) {
+                        m_selectionStart = 0;
+                        m_selectionEnd = cm.size();
+                        m_cursorIndex = cm.size();
+                        update();
+                        emit statusMessage(QString("Selected all %1 chars").arg(cm.size()));
+                    }
                 }
             }
             break;

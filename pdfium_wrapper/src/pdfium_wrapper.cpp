@@ -380,6 +380,10 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
     const char* GetText(int* out_length) override;
     int SearchText(const char* search_text, int flags, int start_index,
                    int max_results, double* out_bounds, int* out_count) override;
+    int GetCharCount() override;
+    int GetCharUnicode(int index) override;
+    void GetCharBox(int index, double* left, double* top,
+                    double* right, double* bottom) override;
     int CountPageElements() override;
     IPdfElement* GetPageElement(int index) override;
     int FindElementsByType(PDF_ElementType type, IPdfElement** out_elements, int max_count) override;
@@ -620,6 +624,39 @@ const char* PdfPageImpl::GetText(int* out_length) {
     }
     if (out_length) *out_length = static_cast<int>(utf8.size());
     return str_dup(utf8);
+}
+
+int PdfPageImpl::GetCharCount() {
+    PDFIUM_SCOPE_LOCK;
+    if (!text_page) return 0;
+    return FPDFText_CountChars(text_page);
+}
+
+int PdfPageImpl::GetCharUnicode(int index) {
+    PDFIUM_SCOPE_LOCK;
+    if (!text_page || index < 0) return 0;
+    int count = FPDFText_CountChars(text_page);
+    if (index >= count) return 0;
+    return static_cast<int>(FPDFText_GetUnicode(text_page, index));
+}
+
+void PdfPageImpl::GetCharBox(int index, double* left, double* top,
+                             double* right, double* bottom) {
+    PDFIUM_SCOPE_LOCK;
+    if (left) *left = 0;
+    if (top) *top = 0;
+    if (right) *right = 0;
+    if (bottom) *bottom = 0;
+    if (!text_page || index < 0) return;
+    int count = FPDFText_CountChars(text_page);
+    if (index >= count) return;
+    // PDFium's GetCharBox reports (left, right, bottom, top).
+    double l = 0, r = 0, b = 0, t = 0;
+    if (!FPDFText_GetCharBox(text_page, index, &l, &r, &b, &t)) return;
+    if (left) *left = l;
+    if (top) *top = t;
+    if (right) *right = r;
+    if (bottom) *bottom = b;
 }
 
 // Collects the bounding box of the current search result.

@@ -205,6 +205,15 @@ struct IPdfPage : public IPdfUnknown {
     virtual int SearchText(const char* search_text, int flags, int start_index,
                            int max_results, double* out_bounds, int* out_count) = 0;
 
+    // Character-level text access, index 0..GetCharCount()-1 (codepoint order,
+    // matching GetText's character sequence). GetCharBox reports the character
+    // box in page coordinates (y-down, top-left origin), same convention as
+    // PageToDevice/DeviceToPage.
+    virtual int GetCharCount() = 0;
+    virtual int GetCharUnicode(int index) = 0;
+    virtual void GetCharBox(int index, double* left, double* top,
+                            double* right, double* bottom) = 0;
+
     // Elements
     virtual int CountPageElements() = 0;
     // Returns a new element object; caller owns a ref (must Release)
