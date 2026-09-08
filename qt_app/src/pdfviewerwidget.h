@@ -72,6 +72,7 @@ private:
     QRectF pageRect() const;
     QPointF mapToPage(const QPoint& widgetPos) const;
     QPoint mapFromPage(const QPointF& pagePos) const;
+    QRectF mappedMatchRect(const QRectF& pageMatch) const;
     
     PdfDocument* m_document = nullptr;
     QImage m_currentImage;

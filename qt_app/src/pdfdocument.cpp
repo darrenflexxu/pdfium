@@ -111,6 +111,9 @@ bool PdfDocument::load(const QString& filePath, const QString& password) {
 
     m_interface = iface;
     m_pageCount = iface->GetPageCount();
+    m_currentSearchTerm.clear();
+    m_searchMatches.clear();
+    m_currentMatchIndex = -1;
     emit pageCountChanged(m_pageCount);
     emit loadFinished(true, "");
     return true;
@@ -122,6 +125,9 @@ void PdfDocument::close() {
         m_interface = nullptr;
         m_pageCount = 0;
     }
+    m_currentSearchTerm.clear();
+    m_searchMatches.clear();
+    m_currentMatchIndex = -1;
 }
 
 int PdfDocument::pageCount() const {
@@ -238,6 +244,95 @@ QList<QRectF> PdfDocument::searchText(int pageIndex, const QString& text, bool c
 
     page->Release();
     return results;
+}
+
+void PdfDocument::startSearch(const QString& text, bool caseSensitive) {
+    m_currentSearchTerm = text;
+    m_searchCaseSensitive = caseSensitive;
+    m_searchMatches.clear();
+    m_currentMatchIndex = -1;
+
+    if (text.isEmpty() || !m_interface) return;
+
+    for (int i = 0; i < m_pageCount; ++i) {
+        QList<QRectF> pageMatches = searchText(i, text, caseSensitive);
+        if (!pageMatches.isEmpty()) {
+            m_searchMatches.insert(i, pageMatches);
+        }
+    }
+}
+
+int PdfDocument::findNextMatch() {
+    if (m_searchMatches.isEmpty()) return -1;
+
+    int total = 0;
+    for (auto it = m_searchMatches.begin(); it != m_searchMatches.end(); ++it) {
+        total += it.value().size();
+    }
+
+    m_currentMatchIndex++;
+    if (m_currentMatchIndex >= total) {
+        m_currentMatchIndex = 0;
+    }
+    return m_currentMatchIndex;
+}
+
+int PdfDocument::findPrevMatch() {
+    if (m_searchMatches.isEmpty()) return -1;
+
+    int total = 0;
+    for (auto it = m_searchMatches.begin(); it != m_searchMatches.end(); ++it) {
+        total += it.value().size();
+    }
+
+    m_currentMatchIndex--;
+    if (m_currentMatchIndex < 0) {
+        m_currentMatchIndex = total - 1;
+    }
+    return m_currentMatchIndex;
+}
+
+int PdfDocument::totalMatches() const {
+    int total = 0;
+    for (auto it = m_searchMatches.begin(); it != m_searchMatches.end(); ++it) {
+        total += it.value().size();
+    }
+    return total;
+}
+
+QList<QRectF> PdfDocument::matchesForPage(int pageIndex) const {
+    return m_searchMatches.value(pageIndex, QList<QRectF>());
+}
+
+int PdfDocument::currentMatchPage() const {
+    if (m_currentMatchIndex < 0 || m_searchMatches.isEmpty()) return -1;
+
+    int cumulative = 0;
+    for (auto it = m_searchMatches.begin(); it != m_searchMatches.end(); ++it) {
+        cumulative += it.value().size();
+        if (m_currentMatchIndex < cumulative) {
+            return it.key();
+        }
+    }
+    return -1;
+}
+
+int PdfDocument::currentMatchIndex() const {
+    return m_currentMatchIndex;
+}
+
+QRectF PdfDocument::currentMatchRect() const {
+    if (m_currentMatchIndex < 0 || m_searchMatches.isEmpty()) return QRectF();
+
+    int cumulative = 0;
+    for (auto it = m_searchMatches.begin(); it != m_searchMatches.end(); ++it) {
+        const QList<QRectF>& pageMatches = it.value();
+        if (m_currentMatchIndex < cumulative + pageMatches.size()) {
+            return pageMatches[m_currentMatchIndex - cumulative];
+        }
+        cumulative += pageMatches.size();
+    }
+    return QRectF();
 }
 
 void PdfDocument::optimizeDocument(const CompressFlags& flags, const QString& outputPath) {

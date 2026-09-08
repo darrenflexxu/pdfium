@@ -162,6 +162,30 @@ void PdfViewerWidget::paintEvent(QPaintEvent* event) {
         // Draw page border
         painter.setPen(QPen(Qt::gray, 1));
         painter.drawRect(pageRect);
+        
+        // Draw search highlights
+        if (m_document && m_document->isLoaded() && m_currentPage >= 0) {
+            const QList<QRectF> matches = m_document->matchesForPage(m_currentPage);
+            QRectF currentMatch;
+            if (m_document->currentMatchPage() == m_currentPage) {
+                currentMatch = m_document->currentMatchRect();
+            }
+            
+            for (const QRectF& match : matches) {
+                QRectF mapped = mappedMatchRect(match);
+                if (mapped.isEmpty()) continue;
+                painter.fillRect(mapped, QColor(255, 255, 0, 90));
+            }
+            
+            if (!currentMatch.isNull()) {
+                QRectF mapped = mappedMatchRect(currentMatch);
+                if (!mapped.isEmpty()) {
+                    painter.fillRect(mapped, QColor(255, 165, 0, 150));
+                    painter.setPen(QPen(QColor(255, 140, 0), 1.5));
+                    painter.drawRect(mapped);
+                }
+            }
+        }
     } else if (m_document && m_document->isLoaded()) {
         // Loading indicator
         painter.setPen(Qt::white);
@@ -434,6 +458,41 @@ QPoint PdfViewerWidget::mapFromPage(const QPointF& pagePos) const {
     if (pRect.isEmpty()) return QPoint();
     
     return (pagePos * m_zoom + pRect.topLeft()).toPoint();
+}
+
+QRectF PdfViewerWidget::mappedMatchRect(const QRectF& pageMatch) const {
+    if (!m_document || m_currentPage < 0) return QRectF();
+    
+    QRectF r = pageMatch.normalized();
+    if (r.isEmpty()) return QRectF();
+    
+    QSizeF pageSize = m_document->pageSize(m_currentPage);
+    if (pageSize.isEmpty()) return QRectF();
+    
+    qreal w = pageSize.width();
+    qreal h = pageSize.height();
+    qreal x1 = r.left(), y1 = r.top();
+    qreal x2 = r.right(), y2 = r.bottom();
+    
+    // Rotate the match from page coordinates into rendered-image coordinates
+    switch (m_rotation) {
+        case 90:
+            r = QRectF(h - y2, x1, y2 - y1, x2 - x1);
+            break;
+        case 180:
+            r = QRectF(w - x2, h - y2, x2 - x1, y2 - y1);
+            break;
+        case 270:
+            r = QRectF(y1, w - x2, y2 - y1, x2 - x1);
+            break;
+        default:
+            break;
+    }
+    
+    QRectF pRect = pageRect();
+    if (pRect.isEmpty()) return QRectF();
+    
+    return QRectF(pRect.topLeft() + r.topLeft() * m_zoom, r.size() * m_zoom);
 }
 
 bool PdfViewerWidget::loadFile(const QString& filePath, const QString& password) {

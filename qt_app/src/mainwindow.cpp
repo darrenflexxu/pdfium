@@ -194,6 +194,13 @@ void MainWindow::createActions() {
         else showNormal();
     });
     
+    // Search action (Ctrl+F)
+    m_searchAction = new QAction(QIcon::fromTheme("edit-find"), tr("&Find..."), this);
+    m_searchAction->setShortcut(Qt::CTRL | Qt::Key_F);
+    m_searchAction->setCheckable(true);
+    m_searchAction->setStatusTip(tr("Search for text in the document"));
+    connect(m_searchAction, &QAction::toggled, this, &MainWindow::toggleSearchBar);
+    
     // Help actions
     m_aboutAction = new QAction(tr("&About"), this);
     m_aboutAction->setStatusTip(tr("Show about dialog"));
@@ -240,6 +247,8 @@ void MainWindow::createMenus() {
     QMenu* viewMenu = menuBar->addMenu(tr("&View"));
     viewMenu->addAction(m_zoomInAction);
     viewMenu->addAction(m_zoomOutAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_searchAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_fullScreenAction);
     
@@ -312,6 +321,39 @@ void MainWindow::createToolBars() {
     toolsToolBar->addAction(m_extractImagesAction);
     toolsToolBar->addSeparator();
     toolsToolBar->addAction(m_docStructureAction);
+    
+    // Search toolbar
+    m_searchToolBar = addToolBar(tr("Search"));
+    m_searchToolBar->setObjectName("searchToolBar");
+    m_searchToolBar->setMovable(false);
+    
+    m_searchEdit = new QLineEdit(m_searchToolBar);
+    m_searchEdit->setPlaceholderText(tr("Search text..."));
+    m_searchEdit->setClearButtonEnabled(true);
+    m_searchEdit->setMinimumWidth(200);
+    m_searchToolBar->addWidget(m_searchEdit);
+    
+    m_searchPrevButton = new QPushButton(QIcon::fromTheme("go-up"), tr("Previous"), m_searchToolBar);
+    m_searchToolBar->addWidget(m_searchPrevButton);
+    
+    m_searchNextButton = new QPushButton(QIcon::fromTheme("go-down"), tr("Next"), m_searchToolBar);
+    m_searchToolBar->addWidget(m_searchNextButton);
+    
+    m_searchLabel = new QLabel(tr("No search"), m_searchToolBar);
+    m_searchLabel->setMinimumWidth(80);
+    m_searchLabel->setAlignment(Qt::AlignCenter);
+    m_searchToolBar->addWidget(m_searchLabel);
+    
+    connect(m_searchEdit, &QLineEdit::returnPressed, this, &MainWindow::startSearch);
+    connect(m_searchEdit, &QLineEdit::textEdited, this, [this](const QString& text) {
+        if (text.isEmpty()) {
+            m_searchLabel->setText(tr("No search"));
+        }
+    });
+    connect(m_searchPrevButton, &QPushButton::clicked, this, &MainWindow::searchPrevMatch);
+    connect(m_searchNextButton, &QPushButton::clicked, this, &MainWindow::searchNextMatch);
+    
+    m_searchToolBar->setVisible(false);
 }
 
 void MainWindow::createStatusBar() {
@@ -415,6 +457,74 @@ void MainWindow::onTextSelected(const QString& text) {
     }
 }
 
+void MainWindow::toggleSearchBar(bool visible) {
+    if (!m_searchToolBar) return;
+    m_searchToolBar->setVisible(visible);
+    if (visible) {
+        m_searchEdit->setFocus();
+        m_searchEdit->selectAll();
+    }
+}
+
+void MainWindow::startSearch() {
+    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    
+    QString term = m_searchEdit->text();
+    if (term.isEmpty()) {
+        m_searchLabel->setText(tr("No search"));
+        return;
+    }
+    
+    PdfDocument* doc = m_viewer->document();
+    if (!doc) return;
+    
+    doc->startSearch(term, false);
+    int total = doc->totalMatches();
+    
+    if (total == 0) {
+        m_searchLabel->setText(tr("No matches"));
+        return;
+    }
+    
+    doc->findNextMatch();
+    updateSearchAfterNavigation();
+    emit m_viewer->statusMessage(tr("Found %1 match(es) for \"%2\"").arg(total).arg(term));
+}
+
+void MainWindow::searchNextMatch() {
+    if (!m_viewer || !m_viewer->document()) return;
+    
+    PdfDocument* doc = m_viewer->document();
+    if (doc->totalMatches() == 0) return;
+    
+    doc->findNextMatch();
+    updateSearchAfterNavigation();
+}
+
+void MainWindow::searchPrevMatch() {
+    if (!m_viewer || !m_viewer->document()) return;
+    
+    PdfDocument* doc = m_viewer->document();
+    if (doc->totalMatches() == 0) return;
+    
+    doc->findPrevMatch();
+    updateSearchAfterNavigation();
+}
+
+void MainWindow::updateSearchAfterNavigation() {
+    PdfDocument* doc = m_viewer->document();
+    if (!doc) return;
+    
+    int total = doc->totalMatches();
+    int currentPage = doc->currentMatchPage();
+    if (currentPage >= 0 && currentPage != m_viewer->currentPage()) {
+        m_viewer->setPage(currentPage);
+    }
+    
+    m_searchLabel->setText(tr("%1 / %2").arg(doc->currentMatchIndex() + 1).arg(total));
+    m_viewer->update();
+}
+
 void MainWindow::updateActions() {
     bool hasDoc = m_viewer && m_viewer->pageCount() > 0;
     m_saveAsAction->setEnabled(hasDoc);
@@ -433,6 +543,7 @@ void MainWindow::updateActions() {
     m_extractTextAction->setEnabled(hasDoc);
     m_extractImagesAction->setEnabled(hasDoc);
     m_docStructureAction->setEnabled(hasDoc);
+    m_searchAction->setEnabled(hasDoc);
     
     updateNavigationActions();
 }

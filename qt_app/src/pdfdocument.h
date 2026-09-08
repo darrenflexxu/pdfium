@@ -39,6 +39,16 @@ public:
     QString getPageText(int pageIndex) const;
     QList<QRectF> searchText(int pageIndex, const QString& text, bool caseSensitive = false);
 
+    // Document-wide search session
+    void startSearch(const QString& text, bool caseSensitive);
+    int findNextMatch();
+    int findPrevMatch();
+    int totalMatches() const;
+    QList<QRectF> matchesForPage(int pageIndex) const;
+    int currentMatchPage() const;
+    int currentMatchIndex() const;
+    QRectF currentMatchRect() const;
+
     // Compression / optimization
     enum CompressFlag {
         CompressNone = 0,
@@ -69,6 +79,12 @@ public:
 
     // Raw interface access (for advanced use / delegation)
     IPdfDocument* interface() const { return m_interface; }
+
+    // Search state
+    QString m_currentSearchTerm;
+    int m_currentMatchIndex = -1;
+    bool m_searchCaseSensitive = false;
+    QMap<int, QList<QRectF>> m_searchMatches;
 
 signals:
     void renderFinished(int pageIndex, QImage image, bool success);

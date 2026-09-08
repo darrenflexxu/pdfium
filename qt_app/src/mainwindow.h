@@ -8,6 +8,8 @@
 #include <QToolBar>
 #include <QStatusBar>
 #include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
 
 class PdfViewerWidget;
 
@@ -39,6 +41,13 @@ private slots:
     void onTextSelected(const QString& text);
     void onOptimizeFinished(bool success, const QString& outputPath, const QString& error);
     void onSaveCompressedFinished(bool success, const QString& filePath, const QString& error);
+    
+    // Document-wide search
+    void startSearch();
+    void searchNextMatch();
+    void searchPrevMatch();
+    void toggleSearchBar(bool visible);
+    void updateSearchAfterNavigation();
     
     void updateActions();
     void updateNavigationActions();
@@ -79,6 +88,14 @@ private:
     QAction* m_fullScreenAction = nullptr;
     QAction* m_aboutAction = nullptr;
     QAction* m_aboutPdfiumAction = nullptr;
+    
+    // Search
+    QAction* m_searchAction = nullptr;
+    QToolBar* m_searchToolBar = nullptr;
+    QLineEdit* m_searchEdit = nullptr;
+    QPushButton* m_searchPrevButton = nullptr;
+    QPushButton* m_searchNextButton = nullptr;
+    QLabel* m_searchLabel = nullptr;
     
     // Status bar
     QLabel* m_pageLabel = nullptr;

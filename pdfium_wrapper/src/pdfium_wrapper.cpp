@@ -8,6 +8,7 @@
 #include <map>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -480,6 +481,38 @@ const char* PdfPageImpl::GetText(int* out_length) {
     return str_dup(utf8);
 }
 
+// Collects the bounding box of the current search result.
+// Uses FPDFText_GetSchResultRect when the API is present; otherwise falls back
+// to merging per-character boxes via FPDFText_GetCharBox.
+static bool get_search_rect(FPDF_SCHHANDLE handle, FPDF_TEXTPAGE text_page, double* out) {
+#ifdef FPDFText_GetSchResultRect
+    (void)text_page;
+    FPDFText_GetSchResultRect(handle, out, out + 1, out + 2, out + 3);
+    return true;
+#else
+    int idx = FPDFText_GetSchResultIndex(handle);
+    int count = FPDFText_GetSchCount(handle);
+    bool first = true;
+    double l = 0, t = 0, r = 0, b = 0;
+    for (int i = 0; i < count; ++i) {
+        double x1, y1, x2, y2;
+        if (!FPDFText_GetCharBox(text_page, idx + i, &x1, &y1, &x2, &y2)) continue;
+        if (first) {
+            l = x1; t = y1; r = x2; b = y2;
+            first = false;
+        } else {
+            l = std::min(l, x1);
+            r = std::max(r, x2);
+            t = std::min(t, y1);
+            b = std::max(b, y2);
+        }
+    }
+    if (first) return false;
+    out[0] = l; out[1] = t; out[2] = r; out[3] = b;
+    return true;
+#endif
+}
+
 int PdfPageImpl::SearchText(const char* search_text, int flags, int start_index,
                             int max_results, double* out_bounds, int* out_count) {
     if (!search_text || !out_bounds || !out_count) return PDF_ERR_INVALID_PARAM;
@@ -505,9 +538,10 @@ int PdfPageImpl::SearchText(const char* search_text, int flags, int start_index,
         if (index < start_index) continue;
 
         double x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-#ifdef FPDFText_GetSchResultRect
-        FPDFText_GetSchResultRect(handle, &x1, &y1, &x2, &y2);
-#endif
+        double coords[4];
+        if (get_search_rect(handle, text_page, coords)) {
+            x1 = coords[0]; y1 = coords[1]; x2 = coords[2]; y2 = coords[3];
+        }
         int base = found * 4;
         out_bounds[base] = x1;
         out_bounds[base + 1] = y1;
