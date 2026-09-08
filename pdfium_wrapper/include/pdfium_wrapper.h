@@ -139,6 +139,7 @@ enum PDF_CompressFlags {
 struct IPdfDocument;
 struct IPdfPage;
 struct IPdfElement;
+struct IPdfOutline;
 
 // ============================================================
 // IPdfUnknown: base interface with ref-counting lifetime
@@ -164,6 +165,11 @@ struct IPdfDocument : public IPdfUnknown {
     // Returns nullptr if no metadata; otherwise a stable pointer valid until
     // the next metadata call or document release.
     virtual const char* GetMetaText(const char* key) = 0;
+
+    // Returns a new outline object rooted at the first top-level bookmark;
+    // caller owns a ref (must Release). Returns nullptr if the document has
+    // no bookmarks.
+    virtual IPdfOutline* GetOutlineRoot() = 0;
 
     // Compression / optimization
     virtual int Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) = 0;
@@ -225,6 +231,29 @@ struct IPdfElement : public IPdfUnknown {
     // Raw content. Returns allocated buffer; caller must free with FreeElementData.
     virtual unsigned char* GetImageData(size_t* out_size) = 0;
     virtual unsigned char* GetPathData(size_t* out_size) = 0;
+};
+
+// ============================================================
+// IPdfOutline (document bookmarks / outline tree)
+// ============================================================
+struct IPdfOutline : public IPdfUnknown {
+    // Returns an allocated UTF-8 title; caller must free with PDF_FreeString.
+    // *out_length receives the byte count (excluding the terminating NUL).
+    // May return an empty string on failure.
+    virtual const char* GetTitle(int* out_length) = 0;
+
+    // Returns a new outline ref for the first child (for a node) or the first
+    // top-level bookmark (for the root). Caller owns the ref (must Release).
+    virtual IPdfOutline* GetFirstChild() = 0;
+
+    // Returns a new outline ref for the next sibling, or nullptr at the end of
+    // a level. Caller owns the ref (must Release). Traversers must guard
+    // against circular references from malformed documents.
+    virtual IPdfOutline* GetNextSibling() = 0;
+
+    // Returns the 0-based destination page index, or -1 if the bookmark has
+    // no resolvable destination.
+    virtual int GetDestinationPage() = 0;
 };
 
 // ============================================================

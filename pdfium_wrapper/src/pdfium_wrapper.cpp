@@ -1,5 +1,6 @@
 #include "pdfium_wrapper.h"
 #include <fpdfview.h>
+#include <fpdf_doc.h>
 #include <fpdf_text.h>
 #include <fpdf_progressive.h>
 #include <atomic>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include <mutex>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -67,6 +69,28 @@ namespace {
 
 // Global library state
 bool g_pdfium_initialized = false;
+
+// PDFium is not thread-safe: the document, page, and syntax-parser state is
+// shared and mutated lazily, so concurrent access from the GUI thread (outline
+// walks, search) and the async render thread corrupts the parser. A single
+// global mutex serializes every FPDF_* call made through the wrapper.
+std::mutex g_pdfium_mutex;
+#define PDFIUM_SCOPE_LOCK std::lock_guard<std::mutex> _pdfium_lock(g_pdfium_mutex)
+
+// Initializes the PDFium library. The caller must already hold g_pdfium_mutex
+// (never call PDF_InitLibrary() from inside a locked wrapper method).
+static void ensure_library_initialized() {
+    if (g_pdfium_initialized) return;
+
+    FPDF_LIBRARY_CONFIG config = {0};
+    config.version = 2;
+    config.m_pUserFontPaths = nullptr;
+    config.m_pIsolate = nullptr;
+    config.m_v8EmbedderSlot = 0;
+    FPDF_InitLibraryWithConfig(&config);
+
+    g_pdfium_initialized = true;
+}
 
 // Reference-counting base
 class RefCounted {
@@ -140,6 +164,7 @@ static std::vector<unsigned short> utf8_to_utf16(const char* str) {
 // Forward decls
 struct PdfPageImpl;
 struct PdfElementImpl;
+struct PdfOutlineImpl;
 
 // ============================================================
 // PdfDocumentImpl
@@ -161,8 +186,11 @@ struct PdfDocumentImpl : public IPdfDocument, public RefCounted {
 
     // IPdfDocument
     int GetPageCount() override {
+        PDFIUM_SCOPE_LOCK;
         return doc ? FPDF_GetPageCount(doc) : 0;
     }
+
+    IPdfOutline* GetOutlineRoot() override;
 
     IPdfPage* GetPage(int page_index) override;
     void GetSize(int page_index, double* width, double* height) override;
@@ -173,6 +201,7 @@ struct PdfDocumentImpl : public IPdfDocument, public RefCounted {
     int GetLastCompressStats(PDF_CompressStats* stats) override;
 
     ~PdfDocumentImpl() override {
+        PDFIUM_SCOPE_LOCK;
         for (auto& pair : page_cache) {
             FPDF_ClosePage(pair.second);
         }
@@ -186,6 +215,75 @@ struct PdfDocumentImpl : public IPdfDocument, public RefCounted {
         FPDF_PAGE p = FPDF_LoadPage(doc, index);
         if (p) page_cache[index] = p;
         return p;
+    }
+};
+
+// ============================================================
+// PdfOutlineImpl
+// ============================================================
+struct PdfOutlineImpl : public IPdfOutline, public RefCounted {
+    PdfDocumentImpl* document = nullptr;
+    FPDF_BOOKMARK bookmark = nullptr;
+
+    PdfOutlineImpl(PdfDocumentImpl* doc, FPDF_BOOKMARK bm) : document(doc), bookmark(bm) {
+        if (document) document->AddRef();
+    }
+
+    void AddRef() override { RefCounted::AddRef(); }
+    void Release() override { RefCounted::Release(); }
+
+    const char* GetTitle(int* out_length) override {
+        PDFIUM_SCOPE_LOCK;
+        if (out_length) *out_length = 0;
+        if (!bookmark) return str_dup("");
+
+        // First query the required byte count (including the UTF16 NUL).
+        unsigned long total = FPDFBookmark_GetTitle(bookmark, nullptr, 0);
+        if (total < 2) return str_dup("");
+
+        // FPDFBookmark_GetTitle always emits UTF-16LE, independent of host
+        // endianness. Read the raw code units and widen them so the shared
+        // utf16_to_utf8 converter can handle surrogate pairs correctly.
+        std::vector<uint16_t> raw(total / sizeof(uint16_t) + 1);
+        if (FPDFBookmark_GetTitle(bookmark, raw.data(), total) == 0) return str_dup("");
+
+        std::vector<wchar_t> wbuf;
+        wbuf.reserve(raw.size());
+        for (uint16_t u : raw) {
+            if (u == 0) break;
+            wbuf.push_back(static_cast<wchar_t>(u));
+        }
+        std::string utf8 = utf16_to_utf8(wbuf.data(), static_cast<int>(wbuf.size()));
+        if (out_length) *out_length = static_cast<int>(utf8.size());
+        return str_dup(utf8);
+    }
+
+    IPdfOutline* GetFirstChild() override {
+        PDFIUM_SCOPE_LOCK;
+        if (!document || !document->doc) return nullptr;
+        FPDF_BOOKMARK child = FPDFBookmark_GetFirstChild(document->doc, bookmark);
+        if (!child) return nullptr;
+        return new PdfOutlineImpl(document, child);
+    }
+
+    IPdfOutline* GetNextSibling() override {
+        PDFIUM_SCOPE_LOCK;
+        if (!document || !document->doc || !bookmark) return nullptr;
+        FPDF_BOOKMARK next = FPDFBookmark_GetNextSibling(document->doc, bookmark);
+        if (!next) return nullptr;
+        return new PdfOutlineImpl(document, next);
+    }
+
+    int GetDestinationPage() override {
+        PDFIUM_SCOPE_LOCK;
+        if (!document || !document->doc || !bookmark) return -1;
+        FPDF_DEST dest = FPDFBookmark_GetDest(document->doc, bookmark);
+        if (!dest) return -1;
+        return FPDFDest_GetDestPageIndex(document->doc, dest);
+    }
+
+    ~PdfOutlineImpl() override {
+        if (document) document->Release();
     }
 };
 
@@ -264,6 +362,7 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
     bool Render(int width, int height, int rotation, int flags,
                 void* buffer, int stride) override;
     void GetSize(double* width, double* height) override {
+        PDFIUM_SCOPE_LOCK;
         double w = 0, h = 0;
         if (document && document->doc) {
             FPDF_GetPageSizeByIndex(document->doc, index, &w, &h);
@@ -286,6 +385,7 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
     int FindElementsByType(PDF_ElementType type, IPdfElement** out_elements, int max_count) override;
 
     ~PdfPageImpl() override {
+        PDFIUM_SCOPE_LOCK;
         if (text_page) FPDFText_ClosePage(text_page);
         // Do NOT close the FPDF_PAGE here; it's cached in the document.
         if (document) document->Release();
@@ -296,6 +396,7 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
 // IPdfDocument implementations
 // ============================================================
 IPdfPage* PdfDocumentImpl::GetPage(int page_index) {
+    PDFIUM_SCOPE_LOCK;
     if (!doc) return nullptr;
     FPDF_PAGE p = getPageRef(page_index);
     if (!p) return nullptr;
@@ -303,7 +404,16 @@ IPdfPage* PdfDocumentImpl::GetPage(int page_index) {
     return page;
 }
 
+IPdfOutline* PdfDocumentImpl::GetOutlineRoot() {
+    PDFIUM_SCOPE_LOCK;
+    if (!doc) return nullptr;
+    FPDF_BOOKMARK bm = FPDFBookmark_GetFirstChild(doc, nullptr);
+    if (!bm) return nullptr;
+    return new PdfOutlineImpl(this, bm);
+}
+
 void PdfDocumentImpl::GetSize(int page_index, double* width, double* height) {
+    PDFIUM_SCOPE_LOCK;
     double w = 0, h = 0;
     if (doc) FPDF_GetPageSizeByIndex(doc, page_index, &w, &h);
     if (width) *width = w;
@@ -311,6 +421,7 @@ void PdfDocumentImpl::GetSize(int page_index, double* width, double* height) {
 }
 
 PDF_DocumentStructure* PdfDocumentImpl::GetDocumentStructure() {
+    PDFIUM_SCOPE_LOCK;
     std::memset(&structure, 0, sizeof(structure));
     if (!doc) return nullptr;
 
@@ -345,6 +456,7 @@ PDF_DocumentStructure* PdfDocumentImpl::GetDocumentStructure() {
 }
 
 const char* PdfDocumentImpl::GetMetaText(const char* key) {
+    PDFIUM_SCOPE_LOCK;
     if (!doc || !key) return nullptr;
 
 #ifdef FPDF_GetMetaText
@@ -361,6 +473,7 @@ const char* PdfDocumentImpl::GetMetaText(const char* key) {
 }
 
 int PdfDocumentImpl::Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) {
+    PDFIUM_SCOPE_LOCK;
     if (!out_handle) return PDF_ERR_INVALID_PARAM;
     *out_handle = nullptr;
 
@@ -388,6 +501,7 @@ int PdfDocumentImpl::Optimize(const PDF_CompressOptions* options, IPdfDocument**
 }
 
 int PdfDocumentImpl::SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) {
+    PDFIUM_SCOPE_LOCK;
     if (!file_path) return PDF_ERR_INVALID_PARAM;
 
 #ifdef FPDF_OptimizeDocument
@@ -403,6 +517,7 @@ int PdfDocumentImpl::SaveWithCompression(const char* file_path, const PDF_Compre
 }
 
 int PdfDocumentImpl::GetLastCompressStats(PDF_CompressStats* stats) {
+    PDFIUM_SCOPE_LOCK;
     if (!stats) return PDF_ERR_INVALID_PARAM;
     std::memset(stats, 0, sizeof(*stats));
 
@@ -436,6 +551,7 @@ static int render_flags_to_pdfium(int flags) {
 
 bool PdfPageImpl::Render(int width, int height, int rotation, int flags,
                          void* buffer, int stride) {
+    PDFIUM_SCOPE_LOCK;
     if (!page || !buffer || width <= 0 || height <= 0) return false;
     if (stride == 0) stride = width * 4;
 
@@ -461,6 +577,7 @@ bool PdfPageImpl::Render(int width, int height, int rotation, int flags,
 void PdfPageImpl::PageToDevice(int start_x, int start_y, int size_x, int size_y,
                                int rotation, double page_x, double page_y,
                                int* device_x, int* device_y) {
+    PDFIUM_SCOPE_LOCK;
     if (!page || !device_x || !device_y) return;
     FPDF_PageToDevice(page, start_x, start_y, size_x, size_y, rotation / 90,
                       page_x, page_y, device_x, device_y);
@@ -469,12 +586,14 @@ void PdfPageImpl::PageToDevice(int start_x, int start_y, int size_x, int size_y,
 void PdfPageImpl::DeviceToPage(int start_x, int start_y, int size_x, int size_y,
                                int rotation, int device_x, int device_y,
                                double* page_x, double* page_y) {
+    PDFIUM_SCOPE_LOCK;
     if (!page || !page_x || !page_y) return;
     FPDF_DeviceToPage(page, start_x, start_y, size_x, size_y, rotation / 90,
                       device_x, device_y, page_x, page_y);
 }
 
 const char* PdfPageImpl::GetText(int* out_length) {
+    PDFIUM_SCOPE_LOCK;
     if (out_length) *out_length = 0;
     if (!text_page) return str_dup("");
 
@@ -537,6 +656,7 @@ static bool get_search_rect(FPDF_SCHHANDLE handle, FPDF_TEXTPAGE text_page, doub
 
 int PdfPageImpl::SearchText(const char* search_text, int flags, int start_index,
                             int max_results, double* out_bounds, int* out_count) {
+    PDFIUM_SCOPE_LOCK;
     if (!search_text || !out_bounds || !out_count) return PDF_ERR_INVALID_PARAM;
     *out_count = 0;
     if (!text_page) return PDF_ERR_UNKNOWN;
@@ -578,6 +698,7 @@ int PdfPageImpl::SearchText(const char* search_text, int flags, int start_index,
 }
 
 int PdfPageImpl::CountPageElements() {
+    PDFIUM_SCOPE_LOCK;
 #ifdef FPDF_CreateElementIterator
     extern "C" { int FPDF_CountPageElements(void* page); }
     return FPDF_CountPageElements(page);
@@ -587,6 +708,7 @@ int PdfPageImpl::CountPageElements() {
 }
 
 IPdfElement* PdfPageImpl::GetPageElement(int index) {
+    PDFIUM_SCOPE_LOCK;
 #ifdef FPDF_CreateElementIterator
     extern "C" { void* FPDF_GetPageElement(void* page, int index); }
     void* ext = FPDF_GetPageElement(page, index);
@@ -619,6 +741,7 @@ IPdfElement* PdfPageImpl::GetPageElement(int index) {
 }
 
 int PdfPageImpl::FindElementsByType(PDF_ElementType type, IPdfElement** out_elements, int max_count) {
+    PDFIUM_SCOPE_LOCK;
     if (!out_elements || max_count <= 0) return 0;
 
 #ifdef FPDF_CreateElementIterator
@@ -660,6 +783,7 @@ int PdfPageImpl::FindElementsByType(PDF_ElementType type, IPdfElement** out_elem
 // IPdfElement implementations
 // ============================================================
 const char* PdfElementImpl::GetElementText(int* out_length) {
+    PDFIUM_SCOPE_LOCK;
     if (out_length) *out_length = 0;
 #ifdef FPDF_CreateElementIterator
     if (type == PDF_ELEMENT_TEXT) {
@@ -672,6 +796,7 @@ const char* PdfElementImpl::GetElementText(int* out_length) {
 }
 
 unsigned char* PdfElementImpl::GetImageData(size_t* out_size) {
+    PDFIUM_SCOPE_LOCK;
     if (out_size) *out_size = 0;
 #ifdef FPDF_CreateElementIterator
     if (type == PDF_ELEMENT_IMAGE) {
@@ -683,6 +808,7 @@ unsigned char* PdfElementImpl::GetImageData(size_t* out_size) {
 }
 
 unsigned char* PdfElementImpl::GetPathData(size_t* out_size) {
+    PDFIUM_SCOPE_LOCK;
     if (out_size) *out_size = 0;
 #ifdef FPDF_CreateElementIterator
     if (type == PDF_ELEMENT_PATH) {
@@ -699,20 +825,13 @@ unsigned char* PdfElementImpl::GetPathData(size_t* out_size) {
 // Exported C API
 // ============================================================
 PDFWRAPPER_API int PDFWRAPPER_CALL PDF_InitLibrary() {
-    if (g_pdfium_initialized) return PDF_OK;
-
-    FPDF_LIBRARY_CONFIG config = {0};
-    config.version = 2;
-    config.m_pUserFontPaths = nullptr;
-    config.m_pIsolate = nullptr;
-    config.m_v8EmbedderSlot = 0;
-    FPDF_InitLibraryWithConfig(&config);
-
-    g_pdfium_initialized = true;
+    PDFIUM_SCOPE_LOCK;
+    ensure_library_initialized();
     return PDF_OK;
 }
 
 PDFWRAPPER_API void PDFWRAPPER_CALL PDF_DestroyLibrary() {
+    PDFIUM_SCOPE_LOCK;
     if (!g_pdfium_initialized) return;
     FPDF_DestroyLibrary();
     g_pdfium_initialized = false;
@@ -723,11 +842,12 @@ PDFWRAPPER_API IPdfDocument* PDFWRAPPER_CALL PDF_CreateDocument(
     const char* password,
     int* out_error
 ) {
+    PDFIUM_SCOPE_LOCK;
     if (!file_path) {
         if (out_error) *out_error = PDF_ERR_INVALID_PARAM;
         return nullptr;
     }
-    if (!g_pdfium_initialized) PDF_InitLibrary();
+    if (!g_pdfium_initialized) ensure_library_initialized();
 
     FPDF_DOCUMENT doc = FPDF_LoadDocument(file_path, password);
     if (!doc) {
@@ -756,6 +876,7 @@ PDFWRAPPER_API void PDFWRAPPER_CALL PDF_FreeString(const char* str) {
 
 PDFWRAPPER_API void PDFWRAPPER_CALL PDF_FreeElementData(void* data) {
     if (!data) return;
+    PDFIUM_SCOPE_LOCK;
 #ifdef FPDF_CreateElementIterator
     extern "C" { void FPDF_FreeElementData(void* data); }
     FPDF_FreeElementData(data);

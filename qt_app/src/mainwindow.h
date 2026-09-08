@@ -10,7 +10,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QDockWidget>
+#include <QTreeView>
+#include <QStandardItemModel>
+#include <QModelIndex>
 
+struct IPdfOutline;
 class PdfViewerWidget;
 
 class MainWindow : public QMainWindow {
@@ -48,6 +53,10 @@ private slots:
     void searchPrevMatch();
     void toggleSearchBar(bool visible);
     void updateSearchAfterNavigation();
+
+    // Bookmarks
+    void rebuildBookmarks();
+    void onBookmarkClicked(const QModelIndex& index);
     
     void updateActions();
     void updateNavigationActions();
@@ -57,6 +66,14 @@ private:
     void createMenus();
     void createToolBars();
     void createStatusBar();
+    void createBookmarksPanel();
+
+    // Recursively appends the sibling chain starting at `first` to
+    // `parentItem` (or the model root when null). Consumes and releases the
+    // refs of `first` and all its siblings. `total` is a tree-wide counter of
+    // processed nodes that hard-caps the walk against malformed/circular
+    // outlines.
+    void addOutlineChildren(IPdfOutline* first, QStandardItem* parentItem, int depth, int& total);
     
     PdfViewerWidget* m_viewer = nullptr;
     
@@ -96,6 +113,11 @@ private:
     QPushButton* m_searchPrevButton = nullptr;
     QPushButton* m_searchNextButton = nullptr;
     QLabel* m_searchLabel = nullptr;
+    
+    // Bookmarks panel
+    QDockWidget* m_bookmarksDock = nullptr;
+    QTreeView* m_bookmarksTree = nullptr;
+    QStandardItemModel* m_bookmarksModel = nullptr;
     
     // Status bar
     QLabel* m_pageLabel = nullptr;

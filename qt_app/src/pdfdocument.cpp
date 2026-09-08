@@ -178,7 +178,7 @@ QPointF PdfDocument::deviceToPage(int pageIndex, const QPointF& devicePos,
     return result;
 }
 
-void PdfDocument::requestRender(int pageIndex, const QSize& size, qreal rotation) {
+QFuture<void> PdfDocument::requestRender(int pageIndex, const QSize& size, qreal rotation) {
     QFuture<void> future = QtConcurrent::run([this, pageIndex, size, rotation]() {
         if (!m_interface) {
             emit renderFinished(pageIndex, QImage(), false);
@@ -234,6 +234,7 @@ void PdfDocument::requestRender(int pageIndex, const QSize& size, qreal rotation
             emit renderFinished(pageIndex, QImage(), false);
         }
     });
+    return future;
 }
 
 void PdfDocument::cancelRender() {
@@ -566,6 +567,11 @@ QByteArray PdfDocument::getElementPathData(int pageIndex, int elementIndex) cons
 PDF_DocumentStructure* PdfDocument::getDocumentStructure() const {
     if (!m_interface) return nullptr;
     return m_interface->GetDocumentStructure();
+}
+
+IPdfOutline* PdfDocument::getOutlineRoot() const {
+    if (!m_interface) return nullptr;
+    return m_interface->GetOutlineRoot();
 }
 
 QString PdfDocument::getMetaText(const QString& key) const {

@@ -1,62 +1,69 @@
-# Implementation Plan: Coordinate Transformation via PDFium Native APIs
+# Implementation Plan: PDF Bookmarks (Outline) Navigation
 
 ## 1. 涉及修改的文件列表
 
-- `pdfium_wrapper/include/pdfium_wrapper.h`: 在 `IPdfPage` 接口中添加 `PageToDevice` 和 `DeviceToPage` 虚函数。
-- `pdfium_wrapper/src/pdfium_wrapper.cpp`: 在 `PdfPageImpl` 中实现上述函数，调用 PDFium 原生 API。
-- `qt_app/src/pdfdocument.h`: 添加转发接口 `pageToDevice` 和 `deviceToPage`。
-- `qt_app/src/pdfdocument.cpp`: 实现转发逻辑，将请求传递给 Wrapper 层的 `IPdfPage`。
-- `qt_app/src/pdfviewerwidget.cpp`: 重构 `mapFromPage` 和 `mapToPage`，删除手动计算旋转/缩放的逻辑，改为调用 `PdfDocument` 的新接口。
+- `pdfium_wrapper/include/pdfium_wrapper.h`: 定义 `IPdfOutline` 接口。
+- `pdfium_wrapper/src/pdfium_wrapper.cpp`: 实现 `PdfOutlineImpl` 类。
+- `qt_app/src/pdfdocument.h`: 添加获取书签根节点 `getOutlineRoot()` 的接口。
+- `qt_app/src/pdfdocument.cpp`: 实现书签根节点的获取逻辑。
+- `qt_app/src/mainwindow.h`: 声明书签侧边栏组件（`QDockWidget`, `QTreeView`, `QStandardItemModel`）。
+- `qt_app/src/mainwindow.cpp`: 实现书签面板的创建、书签树的递归构建以及点击跳转逻辑。
 
 ## 2. 具体执行步骤
 
-### 步骤 1: 扩展 Wrapper 接口与实现
-**目标**: 将 PDFium 内部的坐标转换能力暴露给上层。
+### 步骤 1: 在 Wrapper 层实现书签接口
+**目标**: 封装 PDFium 的书签遍历 API。
 
-1. **修改 `pdfium_wrapper.h`**:
-   - 在 `IPdfPage` 类中增加两个纯虚函数：
-     - `virtual void PageToDevice(double px, double py, double* dx, double* dy) = 0;`
-     - `virtual void DeviceToPage(double dx, double dy, double* px, double* py) = 0;`
-2. **修改 `pdfium_wrapper.cpp`**:
-   - 在 `PdfPageImpl` 中实现上述函数：
-     - `PageToDevice` $\rightarrow$ 调用 `FPDF_PageToDevice(m_page, px, py, dx, dy)`。
-     - `DeviceToPage` $\rightarrow$ 调用 `FPDF_DeviceToPage(m_page, dx, dy, px, py)`。
+1. **定义 `IPdfOutline` 接口**:
+   - `virtual QString GetTitle() = 0;`
+   - `virtual IPdfOutline* GetFirstChild() = 0;`
+   - `virtual IPdfOutline* GetNextSibling() = 0;`
+   - `virtual int GetDestinationPage() = 0;`
+   - `virtual void Release() = 0;`
+2. **实现 `PdfOutlineImpl`**:
+   - 使用 `FPDF_OutlineGetTitle` 获取标题。
+   - 使用 `FPDF_OutlineFirstChild` 和 `FPDF_OutlineNextSibling` 进行树遍历。
+   - 使用 `FPDF_OutlineGetDestination` $\rightarrow$ `FPDF_DestinationGetPageIndex` 获取目标页码。
+3. **在 `IPdfDocument` 中添加接口**:
+   - `virtual IPdfOutline* GetOutlineRoot() = 0;` $\rightarrow$ 调用 `FPDF_LoadOutlineRoot`。
 
-**校验方式**: 编译 Wrapper DLL，使用调试器在 `PdfPageImpl` 中设置断点，验证调用路径是否正确到达 `FPDF_PageToDevice/DeviceToPage`。
+**校验方式**: 使用调试器验证 `GetOutlineRoot` 能正确返回根节点，且可以通过 `GetFirstChild` 遍历到子节点。
 
-### 步骤 2: 在 `PdfDocument` 中构建转发层
-**目标**: 为 Qt 视图提供便捷的坐标转换访问点。
+### 步骤 2: 在 `PdfDocument` 中构建转发逻辑
+**目标**: 为 UI 层提供获取书签结构的入口。
 
-1. **修改 `pdfdocument.h`**:
-   - 添加公开接口：
-     - `QPointF pageToDevice(int pageIndex, const QPointF& pagePos);`
-     - `QPointF deviceToPage(int pageIndex, const QPointF& devicePos);`
-2. **修改 `pdfdocument.cpp`**:
-   - 实现 `pageToDevice`: 获取对应页面的 `IPdfPage` $\rightarrow$ 调用 `PageToDevice` $\rightarrow$ 将结果封装为 `QPointF`。
-   - 实现 `deviceToPage`: 获取对应页面的 `IPdfPage` $\rightarrow$ 调用 `DeviceToPage` $\rightarrow$ 将结果封装为 `QPointF`。
+1. **实现 `getOutlineRoot()`**:
+   - 调用 Wrapper 的 `GetOutlineRoot()` 并返回。
+2. **(可选) 实现树形数据转换**:
+   - 提供一个辅助方法将 `IPdfOutline` 递归转换为 Qt 的 `QStandardItemModel` 结构。
 
-**校验方式**: 在 `PdfDocument` 中添加临时日志，输出输入点和输出点的对比，验证数值是否随页面旋转/缩放而变化。
+**校验方式**: 打印书签根节点的标题，确认能正确读取到文档的书签内容。
 
-### 步骤 3: 重构 `PdfViewerWidget` 的坐标映射
-**目标**: 彻底移除手动计算矩阵的代码，实现“调用 $\rightarrow$ 偏移”的简化逻辑。
+### 步骤 3: 实现 `MainWindow` 书签侧边栏 UI
+**目标**: 提供可交互的书签浏览界面。
 
-1. **修改 `mapFromPage`**:
-   - 调用 `m_document->pageToDevice(m_currentPage, pagePos)` 获得设备坐标。
-   - 最终坐标 = `devicePos + pageRect().topLeft()`。
-2. **修改 `mapToPage`**:
-   - 相对坐标 = `widgetPos - pageRect().topLeft()`。
-   - 调用 `m_document->deviceToPage(m_currentPage, relativePos)` 获得 PDF 坐标。
-3. **更新 `mapRectFromPage` (若存在)**:
-   - 将矩形的左上角和右下角分别通过 `mapFromPage` 转换，重新构造视图矩形。
+1. **创建侧边栏**:
+   - 在 `MainWindow` 中添加一个 `QDockWidget` (名称: "Bookmarks")。
+   - 在 DockWidget 中放入 `QTreeView`。
+2. **构建书签树**:
+   - 当文档加载完成后，递归遍历 `IPdfOutline` 树。
+   - 为每个书签创建 `QStandardItem`，将其标题设为书签名称，将页码存入 `Qt::UserRole`。
+   - 将其添加到 `QStandardItemModel` 中并设置给 `QTreeView`。
+3. **实现跳转逻辑**:
+   - 连接 `QTreeView::clicked` 信号。
+   - 从选中的 Item 中提取页码 $\rightarrow$ 调用 `m_viewer->setPage(pageIndex)`。
 
 **校验方式**:
-- **旋转校验**: 旋转页面 $90^\circ, 180^\circ, 270^\circ$，验证 `mapFromPage(0, 0)` 始终准确对应视图中页面的左上角。
-- **缩放校验**: 改变 Zoom 级别，验证转换后的像素坐标与 PDF 坐标保持线性比例。
+- 运行程序 $\rightarrow$ 打开带书签的 PDF $\rightarrow$ 检查侧边栏是否显示完整的书签树。
+- 点击书签 $\rightarrow$ 验证视图是否立即跳转到对应的页面。
 
-### 步骤 4: 综合端到端验证
-**目标**: 确保整个转换链路在实际场景中无误差。
+### 步骤 4: 细节优化与鲁棒性处理
+**目标**: 提升用户体验和稳定性。
 
-1. **往返测试 (Round-trip)**: 选取随机点 $P \rightarrow$ `mapFromPage` $\rightarrow$ `mapToPage` $\rightarrow$ 验证结果是否回到 $P$（允许 1 像素误差）。
-2. **交互测试**: 实现一个简单的点击反馈，点击页面某点，通过 `mapToPage` 获取 PDF 坐标并打印，验证与 PDF 内部坐标一致。
+1. **空书签处理**: 如果文档没有书签，在侧边栏显示 "No bookmarks available"。
+2. **内存管理**: 确保递归遍历过程中创建的 `IPdfOutline` 对象在构建完模型后被正确 `Release()`。
+3. **UI 同步**: 每次加载新文档时，清空并重新构建书签树。
 
-**校验方式**: 运行应用程序 $\rightarrow$ 随机旋转/缩放 $\rightarrow$ 执行往返测试 $\rightarrow$ 验证坐标一致性。
+**校验方式**:
+- 测试无书签的 PDF 文件，验证界面显示正常。
+- 使用内存检测工具确认没有 `IPdfOutline` 对象的内存泄漏。

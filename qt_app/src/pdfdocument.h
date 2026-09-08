@@ -41,8 +41,10 @@ public:
                          const QPoint& origin, const QSize& deviceSize,
                          int rotation) const;
 
-    // Async rendering
-    void requestRender(int pageIndex, const QSize& size, qreal rotation = 0);
+    // Async rendering. Returns the future backing the render task; callers that
+    // are about to replace or destroy the document must wait for it to finish
+    // (PDFium document handles must not be freed while a render is in flight).
+    QFuture<void> requestRender(int pageIndex, const QSize& size, qreal rotation = 0);
     void cancelRender();
 
     // Text extraction
@@ -86,6 +88,11 @@ public:
     // Document structure / metadata
     PDF_DocumentStructure* getDocumentStructure() const;
     QString getMetaText(const QString& key) const;
+
+    // Bookmarks / outline. Returns a new IPdfOutline ref rooted at the first
+    // top-level bookmark (caller must Release), or nullptr if the document has
+    // no bookmarks.
+    IPdfOutline* getOutlineRoot() const;
 
     // Raw interface access (for advanced use / delegation)
     IPdfDocument* interface() const { return m_interface; }

@@ -26,6 +26,8 @@
 #include <QFontDatabase>
 #include <QDebug>
 
+#include "pdfium_wrapper.h"
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Central widget: PDF Viewer
     m_viewer = new PdfViewerWidget(this);
@@ -39,6 +41,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createMenus();
     createToolBars();
     createStatusBar();
+    createBookmarksPanel();
     
     // Connect viewer signals
     connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
@@ -47,6 +50,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_viewer, &PdfViewerWidget::pageCountChanged, this, &MainWindow::onPageCountChanged);
     connect(m_viewer, &PdfViewerWidget::statusMessage, this, &MainWindow::onStatusMessage);
     connect(m_viewer, &PdfViewerWidget::textSelected, this, &MainWindow::onTextSelected);
+    
+    // Rebuild the bookmarks tree whenever a document is (re)loaded
+    connect(m_viewer, &PdfViewerWidget::pageCountChanged, this, &MainWindow::rebuildBookmarks);
     
     // Connect document signals for new features
     PdfDocument* currentDoc = m_viewer->document();
@@ -369,6 +375,95 @@ void MainWindow::createStatusBar() {
     connect(m_viewer, &PdfViewerWidget::rotationChanged, this, [rotationLabel](int rot) {
         rotationLabel->setText(QString("Rotation: %1°").arg(rot));
     });
+}
+
+void MainWindow::createBookmarksPanel() {
+    m_bookmarksDock = new QDockWidget(tr("Bookmarks"), this);
+    m_bookmarksDock->setObjectName("bookmarksDock");
+    m_bookmarksDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    
+    m_bookmarksTree = new QTreeView(m_bookmarksDock);
+    m_bookmarksTree->setObjectName("bookmarksTree");
+    m_bookmarksModel = new QStandardItemModel(m_bookmarksTree);
+    m_bookmarksTree->setModel(m_bookmarksModel);
+    m_bookmarksTree->setHeaderHidden(true);
+    m_bookmarksTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    
+    m_bookmarksDock->setWidget(m_bookmarksTree);
+    addDockWidget(Qt::LeftDockWidgetArea, m_bookmarksDock);
+    
+    connect(m_bookmarksTree, &QTreeView::clicked, this, &MainWindow::onBookmarkClicked);
+}
+
+void MainWindow::rebuildBookmarks() {
+    if (!m_bookmarksModel) return;
+    m_bookmarksModel->clear();
+    
+    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    PdfDocument* doc = m_viewer->document();
+    if (!doc) return;
+    
+    IPdfOutline* root = doc->getOutlineRoot();
+    if (!root) {
+        QStandardItem* empty = new QStandardItem(tr("No bookmarks available"));
+        empty->setEnabled(false);
+        m_bookmarksModel->appendRow(empty);
+        return;
+    }
+    
+    int total = 0;
+    addOutlineChildren(root, nullptr, 0, total);
+}
+
+void MainWindow::addOutlineChildren(IPdfOutline* first, QStandardItem* parentItem, int depth, int& total) {
+    const int kMaxDepth = 64;
+    const int kMaxBookmarks = 5000;
+    
+    IPdfOutline* cur = first;
+    while (cur) {
+        if (++total > kMaxBookmarks) {
+            cur->Release();
+            break;
+        }
+        
+        int titleLen = 0;
+        const char* rawTitle = cur->GetTitle(&titleLen);
+        QString title = (rawTitle && titleLen > 0)
+                            ? QString::fromUtf8(rawTitle, titleLen)
+                            : QString();
+        if (rawTitle) PDF_FreeString(rawTitle);
+        
+        int page = cur->GetDestinationPage();
+        
+        QStandardItem* item = new QStandardItem(title.isEmpty() ? tr("(Untitled)") : title);
+        item->setData(page, Qt::UserRole);
+        if (page < 0) item->setEnabled(false);
+        
+        if (depth < kMaxDepth) {
+            IPdfOutline* child = cur->GetFirstChild();
+            if (child) {
+                addOutlineChildren(child, item, depth + 1, total);
+            }
+        }
+        
+        if (parentItem) {
+            parentItem->appendRow(item);
+        } else {
+            m_bookmarksModel->appendRow(item);
+        }
+        
+        IPdfOutline* next = cur->GetNextSibling();
+        cur->Release();
+        cur = next;
+    }
+}
+
+void MainWindow::onBookmarkClicked(const QModelIndex& index) {
+    if (!m_viewer) return;
+    int page = index.data(Qt::UserRole).toInt();
+    if (page >= 0 && page < m_viewer->pageCount()) {
+        m_viewer->setPage(page);
+    }
 }
 
 void MainWindow::openFile() {

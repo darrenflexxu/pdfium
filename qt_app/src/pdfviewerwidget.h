@@ -6,6 +6,7 @@
 #include <QPoint>
 #include <QRectF>
 #include <QList>
+#include <QFuture>
 
 class PdfDocument;
 
@@ -13,6 +14,7 @@ class PdfViewerWidget : public QWidget {
     Q_OBJECT
 public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
+    ~PdfViewerWidget() override;
     
     void setDocument(PdfDocument* document);
     PdfDocument* document() const { return m_document; }
@@ -104,6 +106,11 @@ private:
     };
     QMap<int, CachedPage> m_renderCache;
     static const int MAX_CACHE_SIZE = 10;
+
+    // In-flight async render. The widget waits for it before replacing or
+    // destroying the document, because the wrapped PDFium document handles
+    // must stay alive until the render worker releases its page ref.
+    QFuture<void> m_renderFuture;
 };
 
 #endif // PDFVIEWERWIDGET_H

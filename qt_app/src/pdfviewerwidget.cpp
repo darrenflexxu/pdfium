@@ -16,7 +16,13 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent) : QWidget(parent) {
     setAutoFillBackground(true);
 }
 
+PdfViewerWidget::~PdfViewerWidget() {
+    m_renderFuture.waitForFinished();
+}
+
 void PdfViewerWidget::setDocument(PdfDocument* document) {
+    m_renderFuture.waitForFinished();
+
     if (m_document) {
         disconnect(m_document, nullptr, this, nullptr);
     }
@@ -423,7 +429,7 @@ void PdfViewerWidget::requestRender() {
         return;
     }
     
-    m_document->requestRender(m_currentPage, renderSize, m_rotation);
+    m_renderFuture = m_document->requestRender(m_currentPage, renderSize, m_rotation);
 }
 
 QRectF PdfViewerWidget::pageRect() const {
@@ -506,7 +512,11 @@ QRectF PdfViewerWidget::mappedMatchRect(const QRectF& pageMatch) const {
 
 bool PdfViewerWidget::loadFile(const QString& filePath, const QString& password) {
     if (!m_document) return false;
-    
+
+    // The document handles are about to be reused for a different file; the
+    // in-flight render still points at the old FPDF handles.
+    m_renderFuture.waitForFinished();
+
     m_currentPage = -1;
     m_currentImage = QImage();
     m_renderCache.clear();
