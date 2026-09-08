@@ -272,6 +272,12 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
         if (height) *height = h;
     }
     int GetIndex() override { return index; }
+    void PageToDevice(int start_x, int start_y, int size_x, int size_y,
+                      int rotation, double page_x, double page_y,
+                      int* device_x, int* device_y) override;
+    void DeviceToPage(int start_x, int start_y, int size_x, int size_y,
+                      int rotation, int device_x, int device_y,
+                      double* page_x, double* page_y) override;
     const char* GetText(int* out_length) override;
     int SearchText(const char* search_text, int flags, int start_index,
                    int max_results, double* out_bounds, int* out_count) override;
@@ -452,6 +458,22 @@ bool PdfPageImpl::Render(int width, int height, int rotation, int flags,
     return true;
 }
 
+void PdfPageImpl::PageToDevice(int start_x, int start_y, int size_x, int size_y,
+                               int rotation, double page_x, double page_y,
+                               int* device_x, int* device_y) {
+    if (!page || !device_x || !device_y) return;
+    FPDF_PageToDevice(page, start_x, start_y, size_x, size_y, rotation / 90,
+                      page_x, page_y, device_x, device_y);
+}
+
+void PdfPageImpl::DeviceToPage(int start_x, int start_y, int size_x, int size_y,
+                               int rotation, int device_x, int device_y,
+                               double* page_x, double* page_y) {
+    if (!page || !page_x || !page_y) return;
+    FPDF_DeviceToPage(page, start_x, start_y, size_x, size_y, rotation / 90,
+                      device_x, device_y, page_x, page_y);
+}
+
 const char* PdfPageImpl::GetText(int* out_length) {
     if (out_length) *out_length = 0;
     if (!text_page) return str_dup("");
@@ -496,7 +518,7 @@ static bool get_search_rect(FPDF_SCHHANDLE handle, FPDF_TEXTPAGE text_page, doub
     double l = 0, t = 0, r = 0, b = 0;
     for (int i = 0; i < count; ++i) {
         double x1, y1, x2, y2;
-        if (!FPDFText_GetCharBox(text_page, idx + i, &x1, &y1, &x2, &y2)) continue;
+        if (!FPDFText_GetCharBox(text_page, idx + i, &x1, &x2, &y1, &y2)) continue;
         if (first) {
             l = x1; t = y1; r = x2; b = y2;
             first = false;

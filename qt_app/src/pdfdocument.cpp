@@ -141,6 +141,43 @@ QSizeF PdfDocument::pageSize(int pageIndex) const {
     return QSizeF(w, h);
 }
 
+QPointF PdfDocument::pageToDevice(int pageIndex, const QPointF& pagePos,
+                                  const QPoint& origin, const QSize& deviceSize,
+                                  int rotation) const {
+    if (!m_interface) return QPointF();
+
+    IPdfPage* page = m_interface->GetPage(pageIndex);
+    if (!page) return QPointF();
+
+    int rot = (rotation / 90) * 90;
+    int dx = 0, dy = 0;
+    page->PageToDevice(origin.x(), origin.y(), deviceSize.width(), deviceSize.height(),
+                       rot, pagePos.x(), pagePos.y(), &dx, &dy);
+    QPointF result(origin.x() + dx, origin.y() + dy);
+
+    page->Release();
+    return result;
+}
+
+QPointF PdfDocument::deviceToPage(int pageIndex, const QPointF& devicePos,
+                                  const QPoint& origin, const QSize& deviceSize,
+                                  int rotation) const {
+    if (!m_interface) return QPointF();
+
+    IPdfPage* page = m_interface->GetPage(pageIndex);
+    if (!page) return QPointF();
+
+    int rot = (rotation / 90) * 90;
+    double px = 0, py = 0;
+    page->DeviceToPage(origin.x(), origin.y(), deviceSize.width(), deviceSize.height(),
+                       rot, qRound(devicePos.x() - origin.x()), qRound(devicePos.y() - origin.y()),
+                       &px, &py);
+    QPointF result(px, py);
+
+    page->Release();
+    return result;
+}
+
 void PdfDocument::requestRender(int pageIndex, const QSize& size, qreal rotation) {
     QFuture<void> future = QtConcurrent::run([this, pageIndex, size, rotation]() {
         if (!m_interface) {

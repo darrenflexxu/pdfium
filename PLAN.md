@@ -1,63 +1,62 @@
-# Implementation Plan: Full-Featured Text Search
+# Implementation Plan: Coordinate Transformation via PDFium Native APIs
 
 ## 1. 涉及修改的文件列表
 
-- `qt_app/src/pdfdocument.h`: 定义搜索状态变量和会话管理接口。
-- `qt_app/src/pdfdocument.cpp`: 实现跨页搜索逻辑、结果缓存和索引追踪。
-- `qt_app/src/mainwindow.h`: 声明搜索界面组件和相关 Slot。
-- `qt_app/src/mainwindow.cpp`: 实现搜索 UI 布局、`Ctrl+F` 快捷键以及 UI 与逻辑的绑定。
-- `qt_app/src/pdfviewerwidget.cpp`: 实现搜索结果在页面上的视觉高亮显示。
+- `pdfium_wrapper/include/pdfium_wrapper.h`: 在 `IPdfPage` 接口中添加 `PageToDevice` 和 `DeviceToPage` 虚函数。
+- `pdfium_wrapper/src/pdfium_wrapper.cpp`: 在 `PdfPageImpl` 中实现上述函数，调用 PDFium 原生 API。
+- `qt_app/src/pdfdocument.h`: 添加转发接口 `pageToDevice` 和 `deviceToPage`。
+- `qt_app/src/pdfdocument.cpp`: 实现转发逻辑，将请求传递给 Wrapper 层的 `IPdfPage`。
+- `qt_app/src/pdfviewerwidget.cpp`: 重构 `mapFromPage` 和 `mapToPage`，删除手动计算旋转/缩放的逻辑，改为调用 `PdfDocument` 的新接口。
 
 ## 2. 具体执行步骤
 
-### 步骤 1: 在 `PdfDocument` 中实现搜索状态管理
-**目标**: 将单页搜索升级为文档级搜索会话。
+### 步骤 1: 扩展 Wrapper 接口与实现
+**目标**: 将 PDFium 内部的坐标转换能力暴露给上层。
 
-- **修改 `pdfdocument.h`**:
-    - 添加私有成员：`m_currentSearchTerm` (QString), `m_currentMatchIndex` (int), `m_searchCaseSensitive` (bool), `m_searchMatches` (QMap<int, QList<QRectF>>)。
-    - 添加公开接口：
-        - `void startSearch(const QString& text, bool caseSensitive)`
-        - `int findNextMatch()`
-        - `int findPrevMatch()`
-        - `int totalMatches() const`
-        - `QList<QRectF> matchesForPage(int pageIndex) const`
-        - `int currentMatchPage() const`
-        - `QRectF currentMatchRect() const`
-- **修改 `pdfdocument.cpp`**:
-    - 实现 `startSearch`: 遍历所有页面调用 `searchText` 并将结果存入 `m_searchMatches`。
-    - 实现 `findNextMatch`/`findPrevMatch`: 更新 `m_currentMatchIndex` 并处理环形跳转。
-    - 实现辅助查询函数。
+1. **修改 `pdfium_wrapper.h`**:
+   - 在 `IPdfPage` 类中增加两个纯虚函数：
+     - `virtual void PageToDevice(double px, double py, double* dx, double* dy) = 0;`
+     - `virtual void DeviceToPage(double dx, double dy, double* px, double* py) = 0;`
+2. **修改 `pdfium_wrapper.cpp`**:
+   - 在 `PdfPageImpl` 中实现上述函数：
+     - `PageToDevice` $\rightarrow$ 调用 `FPDF_PageToDevice(m_page, px, py, dx, dy)`。
+     - `DeviceToPage` $\rightarrow$ 调用 `FPDF_DeviceToPage(m_page, dx, dy, px, py)`。
 
-**校验方式**: 编写单元测试或在调试模式下调用 `startSearch`，检查 `m_searchMatches` 是否正确记录了所有页面的匹配矩形。
+**校验方式**: 编译 Wrapper DLL，使用调试器在 `PdfPageImpl` 中设置断点，验证调用路径是否正确到达 `FPDF_PageToDevice/DeviceToPage`。
 
-### 步骤 2: 在 `MainWindow` 中构建搜索界面
-**目标**: 提供用户输入搜索词和导航结果的 UI。
+### 步骤 2: 在 `PdfDocument` 中构建转发层
+**目标**: 为 Qt 视图提供便捷的坐标转换访问点。
 
-- **修改 `mainwindow.h`**:
-    - 声明搜索面板组件（`QLineEdit`, `QPushButton` x2, `QLabel`）。
-- **修改 `mainwindow.cpp`**:
-    - 在 `createToolBars` 或单独的布局中创建搜索栏。
-    - 绑定 `Ctrl+F` 快捷键以显示/隐藏搜索栏并聚焦输入框。
-    - 连接 `QLineEdit::returnPressed` 到 `PdfDocument::startSearch`。
-    - 连接“上一个/下一个”按钮到 `PdfDocument::findNextMatch/PrevMatch`，并触发 `PdfViewerWidget::setPage`。
+1. **修改 `pdfdocument.h`**:
+   - 添加公开接口：
+     - `QPointF pageToDevice(int pageIndex, const QPointF& pagePos);`
+     - `QPointF deviceToPage(int pageIndex, const QPointF& devicePos);`
+2. **修改 `pdfdocument.cpp`**:
+   - 实现 `pageToDevice`: 获取对应页面的 `IPdfPage` $\rightarrow$ 调用 `PageToDevice` $\rightarrow$ 将结果封装为 `QPointF`。
+   - 实现 `deviceToPage`: 获取对应页面的 `IPdfPage` $\rightarrow$ 调用 `DeviceToPage` $\rightarrow$ 将结果封装为 `QPointF`。
 
-**校验方式**: 运行程序，按下 `Ctrl+F` 检查搜索栏是否出现，输入文字并回车，检查状态栏或标签是否显示正确的匹配总数。
+**校验方式**: 在 `PdfDocument` 中添加临时日志，输出输入点和输出点的对比，验证数值是否随页面旋转/缩放而变化。
 
-### 步骤 3: 在 `PdfViewerWidget` 中实现视觉高亮
-**目标**: 在 PDF 页面上实时绘制搜索结果。
+### 步骤 3: 重构 `PdfViewerWidget` 的坐标映射
+**目标**: 彻底移除手动计算矩阵的代码，实现“调用 $\rightarrow$ 偏移”的简化逻辑。
 
-- **修改 `pdfviewerwidget.cpp`**:
-    - 修改 `paintEvent`：在绘制完页面图像后，调用 `m_document->matchesForPage(m_currentPage)`。
-    - 遍历匹配矩形，使用 `mapFromPage` 将 PDF 坐标转换为 Widget 坐标。
-    - 使用 `painter.fillRect` 绘制半透明黄色矩形。
-    - 根据 `m_document->currentMatchRect()` 绘制当前选中的匹配项（使用不同颜色，如橙色）。
+1. **修改 `mapFromPage`**:
+   - 调用 `m_document->pageToDevice(m_currentPage, pagePos)` 获得设备坐标。
+   - 最终坐标 = `devicePos + pageRect().topLeft()`。
+2. **修改 `mapToPage`**:
+   - 相对坐标 = `widgetPos - pageRect().topLeft()`。
+   - 调用 `m_document->deviceToPage(m_currentPage, relativePos)` 获得 PDF 坐标。
+3. **更新 `mapRectFromPage` (若存在)**:
+   - 将矩形的左上角和右下角分别通过 `mapFromPage` 转换，重新构造视图矩形。
 
-**校验方式**: 搜索一个已知存在的词，检查页面上是否出现了黄色高亮块；点击“下一个”，检查橙色高亮是否正确移动。
+**校验方式**:
+- **旋转校验**: 旋转页面 $90^\circ, 180^\circ, 270^\circ$，验证 `mapFromPage(0, 0)` 始终准确对应视图中页面的左上角。
+- **缩放校验**: 改变 Zoom 级别，验证转换后的像素坐标与 PDF 坐标保持线性比例。
 
-### 步骤 4: 整体集成与优化
-**目标**: 确保搜索体验流畅且在缩放/旋转时依然准确。
+### 步骤 4: 综合端到端验证
+**目标**: 确保整个转换链路在实际场景中无误差。
 
-- **优化**: 确保 `PdfViewerWidget::update()` 在匹配索引改变时被调用。
-- **健壮性**: 处理搜索词为空或无匹配结果的情况。
+1. **往返测试 (Round-trip)**: 选取随机点 $P \rightarrow$ `mapFromPage` $\rightarrow$ `mapToPage` $\rightarrow$ 验证结果是否回到 $P$（允许 1 像素误差）。
+2. **交互测试**: 实现一个简单的点击反馈，点击页面某点，通过 `mapToPage` 获取 PDF 坐标并打印，验证与 PDF 内部坐标一致。
 
-**校验方式**: 执行端到端测试：打开文档 $\rightarrow$ `Ctrl+F` $\rightarrow$ 输入词 $\rightarrow$ 连续点击“下一个” $\rightarrow$ 缩放页面 $\rightarrow$ 验证高亮位置依然准确。
+**校验方式**: 运行应用程序 $\rightarrow$ 随机旋转/缩放 $\rightarrow$ 执行往返测试 $\rightarrow$ 验证坐标一致性。

@@ -181,6 +181,18 @@ struct IPdfPage : public IPdfUnknown {
     virtual void GetSize(double* width, double* height) = 0;
     virtual int GetIndex() = 0;
 
+    // PDFium-native host coordinate conversion, mirroring FPDF_PageToDevice /
+    // FPDF_DeviceToPage. The device rectangle (start_x/start_y/size_x/size_y)
+    // is the view area the page is drawn into and `rotation` is in degrees
+    // (0/90/180/270, clockwise), matching Render(). Page coordinates share the
+    // same top-left origin / y-down convention as the rendered bitmap.
+    virtual void PageToDevice(int start_x, int start_y, int size_x, int size_y,
+                              int rotation, double page_x, double page_y,
+                              int* device_x, int* device_y) = 0;
+    virtual void DeviceToPage(int start_x, int start_y, int size_x, int size_y,
+                              int rotation, int device_x, int device_y,
+                              double* page_x, double* page_y) = 0;
+
     // Text
     // Returns allocated UTF-8 string; caller must free with FreeString.
     virtual const char* GetText(int* out_length) = 0;

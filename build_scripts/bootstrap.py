@@ -228,6 +228,14 @@ class BootstrapManager:
         """Sync PDFium source using gclient"""
         log_info("Syncing PDFium source...")
         
+        # Offline-friendly idempotency guard: if a fully checked-out source root
+        # is already present (nested repo + DEPS pull, e.g. buildtools), skip the
+        # network sync so builds can proceed without googlesource access.
+        pdfium_src_dir = self.pdfium_dir / "pdfium"
+        if pdfium_src_dir.exists() and (pdfium_src_dir / "buildtools").exists():
+            log_info("PDFium source already present; skipping gclient sync")
+            return True
+        
         # Only sync for current platform to avoid cross-platform toolchain issues
         if self.system == "windows":
             target_os = '["win"]'

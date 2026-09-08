@@ -31,6 +31,16 @@ public:
     int pageCount() const;
     QSizeF pageSize(int pageIndex) const;
 
+    // Coordinate conversion (inherits PDFium's native mapping). The device
+    // rectangle `origin`/`deviceSize` is the view area the page is drawn into;
+    // `rotation` is in degrees (0/90/180/270, clockwise).
+    QPointF pageToDevice(int pageIndex, const QPointF& pagePos,
+                         const QPoint& origin, const QSize& deviceSize,
+                         int rotation) const;
+    QPointF deviceToPage(int pageIndex, const QPointF& devicePos,
+                         const QPoint& origin, const QSize& deviceSize,
+                         int rotation) const;
+
     // Async rendering
     void requestRender(int pageIndex, const QSize& size, qreal rotation = 0);
     void cancelRender();

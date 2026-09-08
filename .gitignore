@@ -60,3 +60,4 @@ third_party/pdfium/include/
 *.log
 .*
 build_debug/*
+build_xcode/*

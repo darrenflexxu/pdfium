@@ -56,6 +56,10 @@ void PdfViewerWidget::setZoom(qreal zoom) {
     if (qFuzzyCompare(zoom, m_zoom)) return;
     
     m_zoom = zoom;
+    // The rendered pixels no longer match the new scale; force pageRect() to
+    // recompute the page size from pageSize*zoom so the canvas is re-rendered
+    // at the correct pixel dimensions.
+    m_currentImage = QImage();
     requestRender();
     emit zoomChanged(m_zoom);
 }
@@ -65,6 +69,8 @@ void PdfViewerWidget::setRotation(int rotation) {
     if (rotation == m_rotation) return;
     
     m_rotation = rotation;
+    // Same as setZoom(): the rendered image is for the previous orientation.
+    m_currentImage = QImage();
     requestRender();
     emit rotationChanged(m_rotation);
 }
@@ -443,56 +449,59 @@ QRectF PdfViewerWidget::pageRect() const {
     return pageRect;
 }
 
-QPointF PdfViewerWidget::mapToPage(const QPoint& widgetPos) const {
+QPointF PdfViewerWidget::mapFromPageF(const QPointF& pagePos) const {
     QRectF pRect = pageRect();
-    if (pRect.isEmpty()) return QPointF();
-    
-    QPointF rel = widgetPos - pRect.topLeft();
-    // Convert to page coordinates (points)
-    // This is simplified - assumes 72 DPI base
-    return rel / m_zoom;
+    if (pRect.isEmpty() || !m_document || m_currentPage < 0) return QPointF();
+
+    // PDFium-native mapping into the page's device rectangle (origin at the
+    // bitmap's pixel origin), then offset by the page rect origin in the view.
+    return m_document->pageToDevice(m_currentPage, pagePos, QPoint(0, 0),
+                                    pRect.size().toSize(), m_rotation)
+        + pRect.topLeft();
 }
 
 QPoint PdfViewerWidget::mapFromPage(const QPointF& pagePos) const {
+    return mapFromPageF(pagePos).toPoint();
+}
+
+QPointF PdfViewerWidget::mapToPage(const QPoint& widgetPos) const {
     QRectF pRect = pageRect();
-    if (pRect.isEmpty()) return QPoint();
+    if (pRect.isEmpty() || !m_document || m_currentPage < 0) return QPointF();
+
+    // Relative to the page rect's origin, then inverted by PDFium.
+    return m_document->deviceToPage(m_currentPage,
+                                    QPointF(widgetPos) - pRect.topLeft(),
+                                    QPoint(0, 0), pRect.size().toSize(),
+                                    m_rotation);
+}
+
+QRectF PdfViewerWidget::mapRectFromPage(const QRectF& pdfRect) const {
+    QRectF r = pdfRect.normalized();
+    if (r.isEmpty() || !m_document || m_currentPage < 0) return QRectF();
     
-    return (pagePos * m_zoom + pRect.topLeft()).toPoint();
+    // Rotating the 4 corners produces a rotated rectangle whose axis-aligned
+    // bounding box is the visible highlight. Use explicit min/max: QRectF::united
+    // treats degenerate (point) rects as no-ops, so it cannot be used here.
+    const QPointF mapped[4] = {
+        mapFromPageF(r.topLeft()),
+        mapFromPageF(r.topRight()),
+        mapFromPageF(r.bottomLeft()),
+        mapFromPageF(r.bottomRight()),
+    };
+    qreal left = mapped[0].x(), right = left;
+    qreal top = mapped[0].y(), bottom = top;
+    for (int i = 1; i < 4; ++i) {
+        left = qMin(left, mapped[i].x());
+        right = qMax(right, mapped[i].x());
+        top = qMin(top, mapped[i].y());
+        bottom = qMax(bottom, mapped[i].y());
+    }
+    return QRectF(left, top, right - left, bottom - top);
 }
 
 QRectF PdfViewerWidget::mappedMatchRect(const QRectF& pageMatch) const {
     if (!m_document || m_currentPage < 0) return QRectF();
-    
-    QRectF r = pageMatch.normalized();
-    if (r.isEmpty()) return QRectF();
-    
-    QSizeF pageSize = m_document->pageSize(m_currentPage);
-    if (pageSize.isEmpty()) return QRectF();
-    
-    qreal w = pageSize.width();
-    qreal h = pageSize.height();
-    qreal x1 = r.left(), y1 = r.top();
-    qreal x2 = r.right(), y2 = r.bottom();
-    
-    // Rotate the match from page coordinates into rendered-image coordinates
-    switch (m_rotation) {
-        case 90:
-            r = QRectF(h - y2, x1, y2 - y1, x2 - x1);
-            break;
-        case 180:
-            r = QRectF(w - x2, h - y2, x2 - x1, y2 - y1);
-            break;
-        case 270:
-            r = QRectF(y1, w - x2, y2 - y1, x2 - x1);
-            break;
-        default:
-            break;
-    }
-    
-    QRectF pRect = pageRect();
-    if (pRect.isEmpty()) return QRectF();
-    
-    return QRectF(pRect.topLeft() + r.topLeft() * m_zoom, r.size() * m_zoom);
+    return mapRectFromPage(pageMatch.normalized());
 }
 
 bool PdfViewerWidget::loadFile(const QString& filePath, const QString& password) {

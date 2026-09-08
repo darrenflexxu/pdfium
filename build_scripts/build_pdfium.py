@@ -81,6 +81,12 @@ class BuildConfig:
             'pdf_is_complete_lib = true',
         ]
         
+        if self.is_debug:
+            # Keep full type/local debug info and never strip symbols.
+            args.append('symbol_level = 2')
+        else:
+            args.append('symbol_level = 1')
+        
         # Platform-specific args
         if self.target_os == "win":
             args.append('target_environment = "win32"')

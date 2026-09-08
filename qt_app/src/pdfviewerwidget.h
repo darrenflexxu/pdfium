@@ -43,6 +43,11 @@ public:
     // Text selection (future)
     void setTextSelectionEnabled(bool enabled);
     
+    // Coordinate mapping (PDF page space <-> widget pixels, rotation-aware)
+    QPoint mapFromPage(const QPointF& pagePos) const;
+    QPointF mapToPage(const QPoint& widgetPos) const;
+    QRectF mapRectFromPage(const QRectF& pdfRect) const;
+    
 signals:
     void pageChanged(int pageIndex);
     void zoomChanged(qreal zoom);
@@ -70,8 +75,7 @@ private:
     void updateViewport();
     void requestRender();
     QRectF pageRect() const;
-    QPointF mapToPage(const QPoint& widgetPos) const;
-    QPoint mapFromPage(const QPointF& pagePos) const;
+    QPointF mapFromPageF(const QPointF& pagePos) const;
     QRectF mappedMatchRect(const QRectF& pageMatch) const;
     
     PdfDocument* m_document = nullptr;
