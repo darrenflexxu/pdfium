@@ -20,6 +20,8 @@
 #include <QVBoxLayout>
 #include <QGroupBox>
 #include <QCheckBox>
+#include <QSpinBox>
+#include <QProgressDialog>
 #include <QDialogButtonBox>
 #include <QDialog>
 #include <QTextEdit>
@@ -679,87 +681,100 @@ void MainWindow::updateNavigationActions() {
 
 void MainWindow::saveOptimized() {
     if (!m_viewer || m_viewer->pageCount() == 0) return;
-    
+
     QString fileName = QFileDialog::getSaveFileName(
         this,
         tr("Save Optimized PDF"),
         QDir::homePath(),
         tr("PDF Files (*.pdf);;All Files (*)")
     );
-    
+
     if (fileName.isEmpty()) return;
-    
+
     // Show compression options dialog
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Optimize PDF"));
-    dialog.resize(400, 300);
-    
+    dialog.resize(400, 340);
+
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    
+
     QGroupBox* optionsGroup = new QGroupBox(tr("Compression Options"));
     QVBoxLayout* optionsLayout = new QVBoxLayout(optionsGroup);
-    
+
     QCheckBox* cbFlate = new QCheckBox(tr("Flate compression (lossless)"), &dialog);
     cbFlate->setChecked(true);
     optionsLayout->addWidget(cbFlate);
-    
-    QCheckBox* cbObjectStreams = new QCheckBox(tr("Object streams"), &dialog);
-    cbObjectStreams->setChecked(true);
-    optionsLayout->addWidget(cbObjectStreams);
-    
+
     QCheckBox* cbImages = new QCheckBox(tr("Recompress images"), &dialog);
     cbImages->setChecked(true);
     optionsLayout->addWidget(cbImages);
-    
-    QCheckBox* cbFonts = new QCheckBox(tr("Subset fonts"), &dialog);
-    cbFonts->setChecked(true);
-    optionsLayout->addWidget(cbFonts);
-    
-    QCheckBox* cbRemoveUnused = new QCheckBox(tr("Remove unused objects"), &dialog);
-    cbRemoveUnused->setChecked(true);
-    optionsLayout->addWidget(cbRemoveUnused);
-    
-    QCheckBox* cbLinearize = new QCheckBox(tr("Linearize (fast web view)"), &dialog);
-    cbLinearize->setChecked(true);
-    optionsLayout->addWidget(cbLinearize);
-    
+
+    QHBoxLayout* qualityRow = new QHBoxLayout;
+    qualityRow->addWidget(new QLabel(tr("Image quality (1-100):"), &dialog));
+    QSpinBox* spQuality = new QSpinBox(&dialog);
+    spQuality->setRange(1, 100);
+    spQuality->setValue(90);
+    qualityRow->addWidget(spQuality);
+    optionsLayout->addLayout(qualityRow);
+
     QCheckBox* cbAnnotations = new QCheckBox(tr("Remove annotations"), &dialog);
     optionsLayout->addWidget(cbAnnotations);
-    
+
     QCheckBox* cbForms = new QCheckBox(tr("Remove form fields"), &dialog);
     optionsLayout->addWidget(cbForms);
-    
+
     QCheckBox* cbBookmarks = new QCheckBox(tr("Remove bookmarks"), &dialog);
     optionsLayout->addWidget(cbBookmarks);
-    
+
+    QCheckBox* cbMetadata = new QCheckBox(tr("Remove metadata"), &dialog);
+    optionsLayout->addWidget(cbMetadata);
+
     layout->addWidget(optionsGroup);
-    
+
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttonBox);
-    
+
     if (dialog.exec() != QDialog::Accepted) return;
-    
-    // Build flags
-    PdfDocument::CompressFlags flags = PdfDocument::CompressNone;
-    if (cbFlate->isChecked()) flags |= PdfDocument::CompressFlate;
-    if (cbObjectStreams->isChecked()) flags |= PdfDocument::CompressObjectStreams;
-    if (cbImages->isChecked()) flags |= PdfDocument::CompressImages;
-    if (cbFonts->isChecked()) flags |= PdfDocument::CompressFonts;
-    if (cbRemoveUnused->isChecked()) flags |= PdfDocument::CompressRemoveUnused;
-    if (cbLinearize->isChecked()) flags |= PdfDocument::CompressLinearize;
-    if (cbAnnotations->isChecked()) flags |= PdfDocument::CompressRemoveUnused; // Approximate
-    if (cbForms->isChecked()) flags |= PdfDocument::CompressRemoveUnused;
-    if (cbBookmarks->isChecked()) flags |= PdfDocument::CompressRemoveUnused;
-    
+
+    // Build compression options from the dialog state.
+    PdfDocument::CompressOptions options;
+    if (cbFlate->isChecked()) options.flags |= PdfDocument::CompressFlate;
+    if (cbImages->isChecked()) options.flags |= PdfDocument::CompressImages;
+    // Unreachable objects are dropped on save regardless; this flag only
+    // enables reporting how many in the stats message.
+    options.flags |= PdfDocument::CompressRemoveUnused;
+    options.imageQuality = spQuality->value();
+    options.removeAnnotations = cbAnnotations->isChecked();
+    options.removeForms = cbForms->isChecked();
+    options.removeBookmarks = cbBookmarks->isChecked();
+    options.removeMetadata = cbMetadata->isChecked();
+
+    PdfDocument* doc = m_viewer->document();
+    if (!doc) return;
+
+    // Create a modal progress dialog driven by the async compression task.
+    QProgressDialog* progress = new QProgressDialog(tr("开始优化..."),
+                                                    QString(), 0, 100, this);
+    progress->setWindowTitle(tr("压缩进度"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setCancelButton(nullptr);
+    progress->setAttribute(Qt::WA_DeleteOnClose);
+    connect(doc, &PdfDocument::compressionProgress, progress,
+            [progress](int pct, const QString& status) {
+                progress->setValue(pct);
+                progress->setLabelText(status);
+            });
+    m_compressProgress = progress;
+
     m_statusLabel->setText(tr("Optimizing PDF..."));
     QApplication::processEvents();
-    
-    // Get the document from viewer and save with compression
-    // Note: This requires the viewer to expose the document
-    // For now, we'll use a workaround
-    QMessageBox::information(this, tr("Optimize"), tr("Optimization would be performed here.\nOutput: %1").arg(fileName));
+
+    doc->saveWithCompression(fileName, options);
 }
 
 void MainWindow::showCompressionDialog() {
@@ -878,8 +893,31 @@ void MainWindow::onOptimizeFinished(bool success, const QString& outputPath, con
 }
 
 void MainWindow::onSaveCompressedFinished(bool success, const QString& filePath, const QString& error) {
+    if (m_compressProgress) {
+        m_compressProgress->close();
+        m_compressProgress = nullptr;
+    }
     if (success) {
         m_statusLabel->setText(tr("Saved compressed: %1").arg(filePath));
+        PdfDocument* doc = m_viewer ? m_viewer->document() : nullptr;
+        PDF_CompressStats stats = doc ? doc->getLastCompressStats()
+                                      : PDF_CompressStats{};
+        const double ratioPct = stats.original_size > 0
+            ? stats.compression_ratio * 100.0
+            : 0.0;
+        QString report = tr("Original: %1 bytes\n"
+                            "Compressed: %2 bytes\n"
+                            "Ratio: %3%\n"
+                            "Objects removed: %4\n"
+                            "Images recompressed: %5\n"
+                            "Fonts subset: %6")
+            .arg(static_cast<qulonglong>(stats.original_size))
+            .arg(static_cast<qulonglong>(stats.compressed_size))
+            .arg(QString::number(ratioPct, 'f', 1))
+            .arg(stats.objects_removed)
+            .arg(stats.images_recompressed)
+            .arg(stats.fonts_subsets);
+        QMessageBox::information(this, tr("Compression Complete"), report);
     } else {
         m_statusLabel->setText(tr("Save failed: %1").arg(error));
         QMessageBox::warning(this, tr("Save Failed"), error);

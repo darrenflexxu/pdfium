@@ -18,6 +18,7 @@
 
 struct IPdfOutline;
 class PdfViewerWidget;
+class QProgressDialog;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -126,6 +127,9 @@ private:
     QLabel* m_pageLabel = nullptr;
     QLabel* m_zoomLabel = nullptr;
     QLabel* m_statusLabel = nullptr;
+
+    // Compression progress dialog (owned via WA_DeleteOnClose)
+    QProgressDialog* m_compressProgress = nullptr;
 };
 
 #endif // MAINWINDOW_H

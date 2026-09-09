@@ -103,8 +103,20 @@ public:
     };
     Q_DECLARE_FLAGS(CompressFlags, CompressFlag)
 
-    void optimizeDocument(const CompressFlags& flags, const QString& outputPath);
-    void saveWithCompression(const QString& filePath, const CompressFlags& flags);
+    struct CompressOptions {
+        CompressFlags flags = CompressFlate;
+        int imageQuality = 90;
+        int imageDpiThreshold = 300;
+        int minImageDpi = 150;
+        int fontSubsetThreshold = 80;
+        bool removeAnnotations = false;
+        bool removeForms = false;
+        bool removeBookmarks = false;
+        bool removeMetadata = false;
+    };
+
+    void optimizeDocument(const CompressOptions& options, const QString& outputPath);
+    void saveWithCompression(const QString& filePath, const CompressOptions& options);
     PDF_CompressStats getLastCompressStats() const;
 
     // Element extraction
@@ -140,6 +152,7 @@ signals:
     void errorOccurred(const QString& message);
     void optimizeFinished(bool success, const QString& outputPath, const QString& errorMessage);
     void saveCompressedFinished(bool success, const QString& filePath, const QString& errorMessage);
+    void compressionProgress(int percentage, const QString& status);
 
 private:
     struct Private;

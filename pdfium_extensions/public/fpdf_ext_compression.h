@@ -45,12 +45,22 @@ typedef struct {
 // Initialize with default options
 void FPDF_CompressOptionsInit(FPDF_CompressOptions* options);
 
+// Progress callback invoked during optimization/saving.
+// `progress` is 0..100 (0=started, 1-60=image stage per page, 70=object
+// removal done, 90=writing file, 100=complete). `status` is a short
+// UTF-8 human-readable message. `user_data` is passed through unchanged.
+typedef void (*FPDF_CompressProgressCallback)(int progress,
+                                              const char* status,
+                                              void* user_data);
+
 // Optimize/Compress a PDF document
 // Returns a new FPDF_DOCUMENT that must be closed with FPDF_CloseDocument
 // The original document is not modified
 FPDF_DOCUMENT FPDF_OptimizeDocument(
     FPDF_DOCUMENT document,
     const FPDF_CompressOptions* options,
+    FPDF_CompressProgressCallback progress_cb,  // Optional progress callback
+    void* user_data,                            // Passed through to progress_cb
     FPDF_FILEWRITE* file_write  // Optional: write directly to file
 );
 
@@ -67,10 +77,13 @@ typedef struct {
 int FPDF_GetLastCompressStats(FPDF_CompressStats* stats);
 
 // Save document with compression (convenience function)
+// May report 0..100 progress through progress_cb (see above).
 int FPDF_SaveWithCompression(
     FPDF_DOCUMENT document,
     const char* file_path,
-    const FPDF_CompressOptions* options
+    const FPDF_CompressOptions* options,
+    FPDF_CompressProgressCallback progress_cb,  // Optional progress callback
+    void* user_data                             // Passed through to progress_cb
 );
 
 #ifdef __cplusplus

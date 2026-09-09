@@ -22,6 +22,11 @@ target_compile_definitions(pdfium_wrapper
         PDFWRAPPER_EXPORTS
         PDF_ENABLE_XFA=0
         PDF_ENABLE_V8=0
+        # The pdfium_extensions static library is always built & linked here,
+        # so the extension entry points (compression, element iteration) are
+        # available. This enables the #ifdef PDFIUM_HAS_EXTENSIONS blocks in
+        # the wrapper implementation.
+        PDFIUM_HAS_EXTENSIONS
 )
 
 # Link against PDFium and PDFium Extensions

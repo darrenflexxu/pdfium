@@ -20,6 +20,22 @@
 #endif
 
 // ============================================================
+// Extension entry points (provided by the pdfium_extensions static library)
+// ============================================================
+#if defined(PDFIUM_HAS_EXTENSIONS)
+extern "C" {
+    void FPDF_CompressOptionsInit(void* o);
+    void* FPDF_OptimizeDocument(void* d, const void* o,
+                                void (*cb)(int, const char*, void*),
+                                void* user, void** out_d);
+    int   FPDF_SaveWithCompression(void* d, const char* p, const void* o,
+                                   void (*cb)(int, const char*, void*),
+                                   void* user);
+    int   FPDF_GetLastCompressStats(void* s);
+}
+#endif
+
+// ============================================================
 // Value structs for element attributes (by-value marshalling)
 // ============================================================
 typedef struct {
@@ -196,8 +212,14 @@ struct PdfDocumentImpl : public IPdfDocument, public RefCounted {
     void GetSize(int page_index, double* width, double* height) override;
     PDF_DocumentStructure* GetDocumentStructure() override;
     const char* GetMetaText(const char* key) override;
-    int Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) override;
-    int SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) override;
+    int Optimize(const PDF_CompressOptions* options,
+                 PDF_CompressProgressCallback progress_cb,
+                 void* user_data,
+                 IPdfDocument** out_handle) override;
+    int SaveWithCompression(const char* file_path,
+                            const PDF_CompressOptions* options,
+                            PDF_CompressProgressCallback progress_cb,
+                            void* user_data) override;
     int GetLastCompressStats(PDF_CompressStats* stats) override;
 
     ~PdfDocumentImpl() override {
@@ -476,46 +498,47 @@ const char* PdfDocumentImpl::GetMetaText(const char* key) {
     return nullptr;
 }
 
-int PdfDocumentImpl::Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) {
+int PdfDocumentImpl::Optimize(const PDF_CompressOptions* options,
+                             PDF_CompressProgressCallback progress_cb,
+                             void* user_data,
+                             IPdfDocument** out_handle) {
     PDFIUM_SCOPE_LOCK;
     if (!out_handle) return PDF_ERR_INVALID_PARAM;
     *out_handle = nullptr;
 
-#ifdef FPDF_OptimizeDocument
-    // Extension-based optimization (requires source build with extensions).
-    extern "C" {
-        void FPDF_CompressOptionsInit(void* o);
-        int  FPDF_OptimizeDocument(void* d, const void* o, void** out_d);
-        int  FPDF_SaveWithCompression(void* d, const char* p, const void* o);
-        int  FPDF_GetLastCompressStats(void* s);
-    }
-    FPDF_DOCUMENT new_doc = nullptr;
-    // The extension interface takes FPDF_DOCUMENT and returns FPDF_DOCUMENT.
-    if (FPDF_OptimizeDocument(doc, options, reinterpret_cast<void**>(&new_doc)) && new_doc) {
-        PdfDocumentImpl* wrapper = new PdfDocumentImpl();
-        wrapper->doc = new_doc;
-        *out_handle = wrapper;
+#ifdef PDFIUM_HAS_EXTENSIONS
+    // The extension optimizes the document IN PLACE (returns the input
+    // handle). No new handle is produced, so the caller keeps ownership of
+    // its existing IPdfDocument. Progress events are forwarded as-is.
+    if (FPDF_OptimizeDocument(doc, options, progress_cb, user_data, nullptr)) {
+        *out_handle = nullptr;
         return PDF_OK;
     }
-    return PDF_ERR_UNSUPPORTED;
+    return PDF_ERR_UNKNOWN;
 #else
     (void)options;
+    (void)progress_cb;
+    (void)user_data;
     return PDF_ERR_UNSUPPORTED;
 #endif
 }
 
-int PdfDocumentImpl::SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) {
+int PdfDocumentImpl::SaveWithCompression(const char* file_path,
+                                        const PDF_CompressOptions* options,
+                                        PDF_CompressProgressCallback progress_cb,
+                                        void* user_data) {
     PDFIUM_SCOPE_LOCK;
     if (!file_path) return PDF_ERR_INVALID_PARAM;
 
-#ifdef FPDF_OptimizeDocument
-    extern "C" {
-        void FPDF_CompressOptionsInit(void* o);
-        int  FPDF_SaveWithCompression(void* d, const char* p, const void* o);
-    }
-    return FPDF_SaveWithCompression(doc, file_path, options) ? PDF_OK : PDF_ERR_UNKNOWN;
+#ifdef PDFIUM_HAS_EXTENSIONS
+    return FPDF_SaveWithCompression(doc, file_path, options, progress_cb,
+                                    user_data)
+               ? PDF_OK
+               : PDF_ERR_UNKNOWN;
 #else
     (void)options;
+    (void)progress_cb;
+    (void)user_data;
     return PDF_ERR_UNSUPPORTED;
 #endif
 }
@@ -525,8 +548,7 @@ int PdfDocumentImpl::GetLastCompressStats(PDF_CompressStats* stats) {
     if (!stats) return PDF_ERR_INVALID_PARAM;
     std::memset(stats, 0, sizeof(*stats));
 
-#ifdef FPDF_OptimizeDocument
-    extern "C" { int FPDF_GetLastCompressStats(void* s); }
+#ifdef PDFIUM_HAS_EXTENSIONS
     return FPDF_GetLastCompressStats(stats) ? PDF_OK : PDF_ERR_UNKNOWN;
 #else
     return PDF_ERR_UNSUPPORTED;

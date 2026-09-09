@@ -16,48 +16,91 @@ struct PdfDocument::Private {
     using FreeStringFunc = void(*)(const char*);
     using FreeElementDataFunc = void(*)(void*);
 
-    QLibrary library;
+    // PDFium keeps a single global library per process. All PdfDocument
+    // instances share one wrapper library that is initialized exactly once and
+    // torn down only when the last live instance releases its reference, so a
+    // document that outlives a sibling never calls into an unloaded dylib.
+    struct LibraryState {
+        QLibrary library;
+        InitLibFunc initLib = nullptr;
+        DestroyLibFunc destroyLib = nullptr;
+        CreateDocFunc createDocument = nullptr;
+        FreeStringFunc freeString = nullptr;
+        FreeElementDataFunc freeElementData = nullptr;
+        bool initialized = false;
+
+        ~LibraryState() {
+            if (!initialized) return;
+            if (destroyLib) destroyLib();
+            library.unload();
+        }
+    };
+
+    static QWeakPointer<LibraryState> s_sharedState;
+    static QMutex s_stateMutex;
+
+    QSharedPointer<LibraryState> state;
     bool libraryLoaded = false;
 
-    InitLibFunc initLib = nullptr;
-    DestroyLibFunc destroyLib = nullptr;
-    CreateDocFunc createDocument = nullptr;
-    FreeStringFunc freeString = nullptr;
-    FreeElementDataFunc freeElementData = nullptr;
-
     bool loadLibrary() {
-        if (libraryLoaded) return true;
+        if (libraryLoaded && state) return true;
+
+        // Reuse a wrapper library already loaded by a sibling document.
+        {
+            QMutexLocker lock(&s_stateMutex);
+            QSharedPointer<LibraryState> existing = s_sharedState.toStrongRef();
+            if (existing) {
+                state = existing;
+                libraryLoaded = true;
+                return true;
+            }
+        }
+
+        QSharedPointer<LibraryState> created = QSharedPointer<LibraryState>::create();
 
 #ifdef _WIN32
-        library.setFileName("pdfium_wrapper.dll");
+        created->library.setFileName("pdfium_wrapper.dll");
 #elif defined(__APPLE__)
-        library.setFileName("libpdfium_wrapper.dylib");
+        created->library.setFileName("libpdfium_wrapper.dylib");
 #else
-        library.setFileName("libpdfium_wrapper.so");
+        created->library.setFileName("libpdfium_wrapper.so");
 #endif
 
-        if (!library.load()) {
-            qWarning() << "Failed to load pdfium_wrapper:" << library.errorString();
+        if (!created->library.load()) {
+            qWarning() << "Failed to load pdfium_wrapper:" << created->library.errorString();
             return false;
         }
 
-        initLib = (InitLibFunc)library.resolve("PDF_InitLibrary");
-        destroyLib = (DestroyLibFunc)library.resolve("PDF_DestroyLibrary");
-        createDocument = (CreateDocFunc)library.resolve("PDF_CreateDocument");
-        freeString = (FreeStringFunc)library.resolve("PDF_FreeString");
-        freeElementData = (FreeElementDataFunc)library.resolve("PDF_FreeElementData");
+        created->initLib = (InitLibFunc)created->library.resolve("PDF_InitLibrary");
+        created->destroyLib = (DestroyLibFunc)created->library.resolve("PDF_DestroyLibrary");
+        created->createDocument = (CreateDocFunc)created->library.resolve("PDF_CreateDocument");
+        created->freeString = (FreeStringFunc)created->library.resolve("PDF_FreeString");
+        created->freeElementData = (FreeElementDataFunc)created->library.resolve("PDF_FreeElementData");
 
-        if (!initLib || !createDocument) {
+        if (!created->initLib || !created->createDocument) {
             qWarning() << "Failed to resolve required PDFium wrapper functions";
-            library.unload();
             return false;
         }
 
-        int result = initLib();
+        int result = created->initLib();
         if (result != PDF_OK) {
             qWarning() << "PDF_InitLibrary failed:" << result;
-            library.unload();
             return false;
+        }
+
+        created->initialized = true;
+
+        {
+            QMutexLocker lock(&s_stateMutex);
+            // Another thread may have created the shared state while we were
+            // loading; prefer it so initialization happens exactly once.
+            QSharedPointer<LibraryState> existing = s_sharedState.toStrongRef();
+            if (existing) {
+                state = existing;
+            } else {
+                s_sharedState = created;
+                state = created;
+            }
         }
 
         libraryLoaded = true;
@@ -65,11 +108,15 @@ struct PdfDocument::Private {
     }
 
     void unloadLibrary() {
-        if (destroyLib) destroyLib();
-        if (libraryLoaded) library.unload();
+        if (!libraryLoaded) return;
         libraryLoaded = false;
+        // The last reset triggers LibraryState teardown (destroy + unload).
+        state.reset();
     }
 };
+
+QWeakPointer<PdfDocument::Private::LibraryState> PdfDocument::Private::s_sharedState;
+QMutex PdfDocument::Private::s_stateMutex;
 
 PdfDocument::PdfDocument(QObject* parent) : QObject(parent), d(std::make_unique<Private>()) {
 }
@@ -93,7 +140,7 @@ bool PdfDocument::load(const QString& filePath, const QString& password) {
     QByteArray pwdUtf8 = password.toUtf8();
 
     int error = PDF_OK;
-    IPdfDocument* iface = d->createDocument(
+    IPdfDocument* iface = d->state->createDocument(
         pathUtf8.constData(),
         password.isEmpty() ? nullptr : pwdUtf8.constData(),
         &error);
@@ -245,7 +292,7 @@ void PdfDocument::cancelRender() {
 }
 
 QString PdfDocument::getPageText(int pageIndex) const {
-    if (!m_interface || !d->freeString) return QString();
+    if (!m_interface || !d->state->freeString) return QString();
 
     IPdfPage* page = m_interface->GetPage(pageIndex);
     if (!page) return QString();
@@ -253,7 +300,7 @@ QString PdfDocument::getPageText(int pageIndex) const {
     int length = 0;
     const char* text = page->GetText(&length);
     QString resultStr = text ? QString::fromUtf8(text, length) : QString();
-    if (text) d->freeString(text);
+    if (text) d->state->freeString(text);
 
     page->Release();
     return resultStr;
@@ -583,25 +630,47 @@ QRectF PdfDocument::currentMatchRect() const {
     return QRectF();
 }
 
-void PdfDocument::optimizeDocument(const CompressFlags& flags, const QString& outputPath) {
-    QFuture<void> future = QtConcurrent::run([this, flags, outputPath]() {
+namespace {
+
+PDF_CompressOptions toPdfCompressOptions(
+    const PdfDocument::CompressOptions& o) {
+    PDF_CompressOptions out;
+    std::memset(&out, 0, sizeof(out));
+    out.flags = static_cast<int>(o.flags);
+    out.image_quality = o.imageQuality;
+    out.image_dpi_threshold = o.imageDpiThreshold;
+    out.min_image_dpi = o.minImageDpi;
+    out.font_subset_threshold = o.fontSubsetThreshold;
+    out.remove_annotations = o.removeAnnotations ? 1 : 0;
+    out.remove_forms = o.removeForms ? 1 : 0;
+    out.remove_bookmarks = o.removeBookmarks ? 1 : 0;
+    out.remove_metadata = o.removeMetadata ? 1 : 0;
+    return out;
+}
+
+// C bridge: turn the wrapper's C progress callback into a Qt signal. Forwarded
+// with `PdfDocument*` as user_data; only dereferenced while the async task is
+// running (the document outlives the call).
+void CompressionProgressThunk(int progress, const char* status, void* user_data) {
+    auto* doc = static_cast<PdfDocument*>(user_data);
+    emit doc->compressionProgress(progress,
+                                  QString::fromUtf8(status ? status : ""));
+}
+
+}  // namespace
+
+void PdfDocument::optimizeDocument(const CompressOptions& options, const QString& outputPath) {
+    QFuture<void> future = QtConcurrent::run([this, options, outputPath]() {
         if (!m_interface) {
             emit optimizeFinished(false, outputPath, "No document loaded");
             return;
         }
 
-        PDF_CompressOptions options;
-        std::memset(&options, 0, sizeof(options));
-        options.flags = static_cast<int>(flags);
-        options.image_quality = 90;
-        options.image_dpi_threshold = 300;
-        options.min_image_dpi = 150;
-        options.font_subset_threshold = 80;
-
+        PDF_CompressOptions pdfOptions = toPdfCompressOptions(options);
         IPdfDocument* optimized = nullptr;
-        int result = m_interface->Optimize(&options, &optimized);
-        if (result == PDF_OK && optimized) {
-            optimized->Release();
+        int result = m_interface->Optimize(&pdfOptions, CompressionProgressThunk,
+                                           this, &optimized);
+        if (result == PDF_OK) {
             emit optimizeFinished(true, outputPath, "");
         } else if (result == PDF_ERR_UNSUPPORTED) {
             emit optimizeFinished(false, outputPath,
@@ -612,23 +681,20 @@ void PdfDocument::optimizeDocument(const CompressFlags& flags, const QString& ou
     });
 }
 
-void PdfDocument::saveWithCompression(const QString& filePath, const CompressFlags& flags) {
-    QFuture<void> future = QtConcurrent::run([this, filePath, flags]() {
+void PdfDocument::saveWithCompression(const QString& filePath, const CompressOptions& options) {
+    QFuture<void> future = QtConcurrent::run([this, filePath, options]() {
         if (!m_interface) {
             emit saveCompressedFinished(false, filePath, "No document loaded");
             return;
         }
 
-        PDF_CompressOptions options;
-        std::memset(&options, 0, sizeof(options));
-        options.flags = static_cast<int>(flags);
-        options.image_quality = 90;
-        options.image_dpi_threshold = 300;
-        options.min_image_dpi = 150;
-        options.font_subset_threshold = 80;
+        PDF_CompressOptions pdfOptions = toPdfCompressOptions(options);
 
         QByteArray pathUtf8 = filePath.toUtf8();
-        int result = m_interface->SaveWithCompression(pathUtf8.constData(), &options);
+        int result = m_interface->SaveWithCompression(pathUtf8.constData(),
+                                                      &pdfOptions,
+                                                      CompressionProgressThunk,
+                                                      this);
 
         if (result == PDF_OK) {
             emit saveCompressedFinished(true, filePath, "");
@@ -709,7 +775,7 @@ QList<PdfElementInfo> PdfDocument::findElementsByType(int pageIndex, PDF_Element
 }
 
 QString PdfDocument::getElementText(int pageIndex, int elementIndex) const {
-    if (!m_interface || !d->freeString) return QString();
+    if (!m_interface || !d->state->freeString) return QString();
 
     IPdfPage* page = m_interface->GetPage(pageIndex);
     if (!page) return QString();
@@ -721,7 +787,7 @@ QString PdfDocument::getElementText(int pageIndex, int elementIndex) const {
         const char* text = element->GetElementText(&length);
         if (text) {
             result = QString::fromUtf8(text, length);
-            d->freeString(text);
+            d->state->freeString(text);
         }
         element->Release();
     }
@@ -732,7 +798,7 @@ QString PdfDocument::getElementText(int pageIndex, int elementIndex) const {
 
 QByteArray PdfDocument::getElementImageData(int pageIndex, int elementIndex) const {
     QByteArray data;
-    if (!m_interface || !d->freeElementData) return data;
+    if (!m_interface || !d->state->freeElementData) return data;
 
     IPdfPage* page = m_interface->GetPage(pageIndex);
     if (!page) return data;
@@ -744,7 +810,7 @@ QByteArray PdfDocument::getElementImageData(int pageIndex, int elementIndex) con
         if (img && size > 0) {
             data = QByteArray(reinterpret_cast<const char*>(img), static_cast<int>(size));
         }
-        if (img) d->freeElementData(img);
+        if (img) d->state->freeElementData(img);
         element->Release();
     }
 
@@ -754,7 +820,7 @@ QByteArray PdfDocument::getElementImageData(int pageIndex, int elementIndex) con
 
 QByteArray PdfDocument::getElementPathData(int pageIndex, int elementIndex) const {
     QByteArray data;
-    if (!m_interface || !d->freeElementData) return data;
+    if (!m_interface || !d->state->freeElementData) return data;
 
     IPdfPage* page = m_interface->GetPage(pageIndex);
     if (!page) return data;
@@ -766,7 +832,7 @@ QByteArray PdfDocument::getElementPathData(int pageIndex, int elementIndex) cons
         if (path && size > 0) {
             data = QByteArray(reinterpret_cast<const char*>(path), static_cast<int>(size));
         }
-        if (path) d->freeElementData(path);
+        if (path) d->state->freeElementData(path);
         element->Release();
     }
 

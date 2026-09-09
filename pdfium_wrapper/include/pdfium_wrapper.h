@@ -90,6 +90,14 @@ typedef struct {
     int fonts_subsets;
 } PDF_CompressStats;
 
+// Progress callback for compression/optimization. `progress` is 0..100
+// (0=started, 1-60=image stage per page, 70=object removal, 90=writing file,
+// 100=done). `status` is a short UTF-8 message; `user_data` is passed through
+// unchanged.
+typedef void (*PDF_CompressProgressCallback)(int progress,
+                                             const char* status,
+                                             void* user_data);
+
 // Element type
 typedef enum {
     PDF_ELEMENT_UNKNOWN = 0,
@@ -172,8 +180,14 @@ struct IPdfDocument : public IPdfUnknown {
     virtual IPdfOutline* GetOutlineRoot() = 0;
 
     // Compression / optimization
-    virtual int Optimize(const PDF_CompressOptions* options, IPdfDocument** out_handle) = 0;
-    virtual int SaveWithCompression(const char* file_path, const PDF_CompressOptions* options) = 0;
+    virtual int Optimize(const PDF_CompressOptions* options,
+                         PDF_CompressProgressCallback progress_cb,
+                         void* user_data,
+                         IPdfDocument** out_handle) = 0;
+    virtual int SaveWithCompression(const char* file_path,
+                                    const PDF_CompressOptions* options,
+                                    PDF_CompressProgressCallback progress_cb,
+                                    void* user_data) = 0;
     virtual int GetLastCompressStats(PDF_CompressStats* stats) = 0;
 };
 
