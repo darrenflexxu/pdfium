@@ -7,6 +7,8 @@
 #include <QScrollBar>
 #include <QApplication>
 #include <QClipboard>
+#include <QMenu>
+#include <QContextMenuEvent>
 #include <QDebug>
 
 PdfViewerWidget::PdfViewerWidget(QWidget* parent) : QWidget(parent) {
@@ -228,10 +230,23 @@ void PdfViewerWidget::paintEvent(QPaintEvent* event) {
         const int b = qMax(m_selectionStart, m_selectionEnd);
         if (a >= 0 && b > a && a < cm.size()) {
             const int hi = qMin(b, (int)cm.size());
+            QRectF lineRect;
             for (int i = a; i < hi; ++i) {
-                QRectF mapped = mapRectFromPage(cm[i].bounds);
-                if (mapped.isEmpty()) continue;
-                painter.fillRect(mapped, QColor(0, 120, 215, 90));
+                QRectF charRect = cm[i].bounds;
+                // Merge characters on the same line (approximate Y coordinate)
+                if (i == a || qAbs(charRect.top() - lineRect.top()) > 2.0) {
+                    if (!lineRect.isEmpty()) {
+                        QRectF mapped = mapRectFromPage(lineRect);
+                        if (!mapped.isEmpty()) painter.fillRect(mapped, QColor(0, 120, 215, 90));
+                    }
+                    lineRect = charRect;
+                } else {
+                    lineRect = lineRect.united(charRect);
+                }
+            }
+            if (!lineRect.isEmpty()) {
+                QRectF mapped = mapRectFromPage(lineRect);
+                if (!mapped.isEmpty()) painter.fillRect(mapped, QColor(0, 120, 215, 90));
             }
         }
         // Box fallback overlay (pages with no selectable text at all).
@@ -405,6 +420,58 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
             event->accept();
         }
     }
+}
+
+void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
+    QMenu* menu = buildContextMenu(event->pos());
+    if (!menu) {
+        QWidget::contextMenuEvent(event);
+        return;
+    }
+    menu->exec(event->globalPos());
+    delete menu;
+}
+
+QMenu* PdfViewerWidget::buildContextMenu(const QPoint& widgetPos) {
+    if (!m_document || m_currentPage < 0)
+        return nullptr;
+    const int a = qMin(m_selectionStart, m_selectionEnd);
+    const int b = qMax(m_selectionStart, m_selectionEnd);
+    if (m_textSelectionEnabled && a >= 0 && b > a) {
+        // Active selection: offer "Copy" so the user can copy it manually.
+        QMenu* menu = new QMenu(this);
+        QAction* copy = menu->addAction(tr("Copy"));
+        connect(copy, &QAction::triggered, this, &PdfViewerWidget::copySelectedText);
+        return menu;
+    }
+    // No active selection: reposition the caret at the right-click point so a
+    // subsequent drag selects from here.
+    if (m_textSelectionEnabled) {
+        const QPointF pagePos = mapToPage(widgetPos);
+        const int idx = m_document->findNearestCharIndex(m_currentPage, pagePos);
+        if (idx >= 0) {
+            m_cursorIndex = idx;
+            m_selectionStart = m_selectionEnd = idx;
+            m_boxSelStart = m_boxSelEnd = QPoint();
+            update();
+        }
+    }
+    return nullptr;
+}
+
+void PdfViewerWidget::copySelectedText() {
+    if (!m_document || m_currentPage < 0)
+        return;
+    const int a = qMin(m_selectionStart, m_selectionEnd);
+    const int b = qMax(m_selectionStart, m_selectionEnd);
+    if (a < 0 || b <= a)
+        return;
+    const QString text = m_document->textForRange(m_currentPage, a, b);
+    if (text.isEmpty())
+        return;
+    QApplication::clipboard()->setText(text);
+    emit textSelected(text);
+    emit statusMessage("Text copied to clipboard");
 }
 
 void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {

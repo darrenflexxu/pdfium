@@ -1,56 +1,49 @@
-# 实现计划：PDFium Debug/Release 库版本自动切换
+# 实现计划：文本选择右键复制功能
 
 ## 1. 需求背景
-目前项目在编译时仅链接一个 PDFium 静态库文件。为了在 Xcode 中进行高效调试，需要实现在 Debug 配置下链接带调试符号的 PDFium 库（以便 Step Into 源代码），而在 Release 配置下链接经过优化且无符号的 PDFium 库。
+目前文本选择在释放鼠标时会自动复制到剪贴板，但缺乏标准的 UI 交互。用户希望在选中一段文本后，可以通过右键点击弹出上下文菜单，并从中选择“复制”操作来手动复制选中的文本。
 
 ## 2. 涉及修改的文件列表
-- `build_scripts/build_pdfium.py`: 修改产物提取逻辑，区分命名。
-- `CMakeLists.txt`: 重构构建目标与链接逻辑。
+- `qt_app/src/pdfviewerwidget.h`: 声明 `contextMenuEvent` 覆盖函数。
+- `qt_app/src/pdfviewerwidget.cpp`: 实现右键菜单逻辑及文本复制调用。
 
 ## 3. 具体执行步骤
 
-### 步骤 1: 修改 PDFium 产物提取逻辑 (`build_pdfium.py`)
-**目标**: 确保 Debug 和 Release 版本的库文件在提取到 `third_party/pdfium/lib` 时不会互相覆盖。
+### 步骤 1: 声明上下文菜单事件 (`PdfViewerWidget`)
+**目标**: 让 `PdfViewerWidget` 能够拦截并处理右键点击事件。
 
-- **修改点**: 在 `_extract_windows_artifacts`, `_extract_macos_artifacts`, `_extract_linux_artifacts` 函数中：
-    - 在复制主库文件（如 `libpdfium.a` 或 `pdfium.lib`）时，检查 `self.config.is_debug`。
-    - 如果是 Debug 版本，将目标文件名改为 `libpdfium_debug.a` / `pdfium_debug.lib`。
-    - 如果是 Release 版本，保持原名 `libpdfium.a` / `pdfium.lib`。
-- **校验方式**: 执行 `python3 build_scripts/build_pdfium.py --debug` 和 `python3 build_scripts/build_pdfium.py --release` 后，检查 `third_party/pdfium/lib/` 目录下同时存在 `libpdfium.a` 和 `libpdfium_debug.a`。
+- **修改点**: 在 `protected` 区域添加 `void contextMenuEvent(QContextMenuEvent* event) override;`。
+- **校验方式**: 编译检查，确保无语法错误。
 
-### 步骤 2: 定义多配置库路径 (`CMakeLists.txt`)
-**目标**: 在 CMake 配置阶段定义两套不同的库路径。
+### 步骤 2: 实现右键菜单逻辑 (`PdfViewerWidget`)
+**目标**: 根据当前选择状态动态显示菜单。
 
-- **修改点**: 
-    - 定义 `PDFIUM_LIB_RELEASE` 变量，指向标准库路径。
-    - 定义 `PDFIUM_LIB_DEBUG` 变量，指向带 `_debug` 后缀的库路径。
-- **校验方式**: 运行 `cmake ..`，通过 `cmake-gui` 或命令行检查这两个缓存变量是否正确定义。
-
-### 步骤 3: 创建分离的 PDFium 构建目标 (`CMakeLists.txt`)
-**目标**: 允许开发者通过 CMake 目标分别触发 Debug 和 Release 版本的 PDFium 编译。
-
-- **修改点**:
-    - 将原有的单一 `pdfium_build` 目标拆分为 `pdfium_build_debug` 和 `pdfium_build_release`。
-    - `pdfium_build_debug` 调用 `build_pdfium.py --debug`。
-    - `pdfium_build_release` 调用 `build_pdfium.py --release`。
-    - 创建一个元目标 `pdfium_build`，使其依赖于上述两个目标，实现一次性生成两套库。
-- **校验方式**: 执行 `cmake --build . --target pdfium_build_debug`，验证是否生成了调试版库。
-
-### 步骤 4: 实现配置感知链接 (`CMakeLists.txt`)
-**目标**: 使 Xcode 的 Build Configuration 决定链接哪个库。
-
-- **修改点**:
-    - 使用 CMake 生成器表达式 (Generator Expressions) 修改 `pdfium` 接口库的链接指令：
-      `target_link_libraries(pdfium INTERFACE $<$<CONFIG:Debug>:${PDFIUM_LIB_DEBUG}> $<$<NOT:$<CONFIG:Debug>>:${PDFIUM_LIB_RELEASE}>)`
+- **实现细节**:
+    1. **检查选区**: 在 `contextMenuEvent` 中检查 `m_selectionStart` 和 `m_selectionEnd` 是否不相等且均 $\ge 0$。
+    2. **创建菜单**: 实例化一个 `QMenu`。
+    3. **添加“复制”项**: 如果存在有效选区，添加一个 `addAction(tr("Copy"))`。
+    4. **绑定动作**: 为“复制”动作绑定一个 Lambda 表达式或槽函数，执行以下操作：
+        - 调用 `m_document->textForRange(m_currentPage, a, b)` 获取选中文本。
+        - 使用 `QApplication::clipboard()->setText(text)` 将文本写入剪贴板。
+        - 发出 `textSelected(text)` 信号以通知 UI（如状态栏显示）。
+    5. **显示菜单**: 调用 `menu.exec(event->globalPos())` 在鼠标位置弹出菜单。
 - **校验方式**: 
-    1. 在 Xcode 中选择 **Debug** 方案 $\rightarrow$ 编译 $\rightarrow$ 使用 `otool -L` 或检查链接日志，确认链接的是 `libpdfium_debug.a`。
-    2. 在 Xcode 中选择 **Release** 方案 $\rightarrow$ 编译 $\rightarrow$ 确认链接的是 `libpdfium.a`。
+    - 选中一段文字 $\rightarrow$ 右键点击 $\rightarrow$ 验证弹出菜单包含“复制”选项 $\rightarrow$ 点击“复制” $\rightarrow$ 验证剪贴板内容正确。
+    - 未选中任何文字 $\rightarrow$ 右键点击 $\rightarrow$ 验证不弹出“复制”选项（或弹出空菜单）。
+
+### 步骤 3: 优化交互体验 (UX)
+**目标**: 确保右键操作与现有选择逻辑协调。
+
+- **细节调整**:
+    - 如果用户在没有选中状态下右键点击，可以考虑调用 `mousePressEvent` 的逻辑来将光标定位到点击位置。
+    - 确保菜单弹出时不会意外触发 `mouseReleaseEvent` 中的自动复制逻辑（如果以后决定取消自动复制）。
+- **校验方式**: 快速连续点击、在页面边缘点击等边界测试。
 
 ## 4. 综合校验方案
 
 | 测试场景 | 操作步骤 | 预期结果 |
 | :--- | :--- | :--- |
-| **双版本产出** | 执行 `cmake --build . --target pdfium_build` | `lib/` 目录下同时存在 `.a` 和 `_debug.a` 文件 |
-| **Debug 符号验证** | Xcode 选择 Debug $\rightarrow$ 运行 $\rightarrow$ 在 PDFium 代码中打断点/单步执行 | 能够正常进入 PDFium 内部函数，变量值可见 |
-| **Release 优化验证** | Xcode 选择 Release $\rightarrow$ 编译 $\rightarrow$ 检查二进制大小 | 最终 App 体积较小，PDFium 部分无调试符号 |
-| **路径灵活性** | 修改 `PDFIUM_LIB_DEBUG` 变量路径 $\rightarrow$ 重新编译 | 编译器正确使用新路径下的库文件 |
+| **选中复制** | 选中一段文本 $\rightarrow$ 右键 $\rightarrow$ 点击“复制” | 剪贴板内容与选中文字一致 |
+| **未选中右键** | 在空白区域右键点击 | 不显示“复制”选项 |
+| **跨行选中复制** | 跨行选中 $\rightarrow$ 右键 $\rightarrow$ 点击“复制” | 复制结果包含正确的换行符 |
+| **状态同步** | 点击右键“复制” | 状态栏显示“Text copied to clipboard” |

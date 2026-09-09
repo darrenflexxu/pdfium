@@ -9,6 +9,8 @@
 #include <QFuture>
 
 class PdfDocument;
+class QMenu;
+class QContextMenuEvent;
 
 class PdfViewerWidget : public QWidget {
     Q_OBJECT
@@ -75,6 +77,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void leaveEvent(QEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    QMenu* buildContextMenu(const QPoint& widgetPos);
+    void copySelectedText();
     
 private slots:
     void onRenderFinished(int pageIndex, QImage image, bool success);
