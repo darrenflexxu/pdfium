@@ -6,6 +6,7 @@
 #include <QPoint>
 #include <QRectF>
 #include <QList>
+#include <QSet>
 #include <QFuture>
 
 class PdfDocument;
@@ -47,6 +48,11 @@ public:
     // Text selection (future)
     void setTextSelectionEnabled(bool enabled);
 
+    // Display modes: single page at a time, or all pages in a vertical strip.
+    enum class ViewMode { SinglePage, Continuous };
+    void setViewMode(ViewMode mode);
+    ViewMode viewMode() const { return m_viewMode; }
+
     // Linear text-selection state (char map indices).
     int cursorCharIndex() const { return m_cursorIndex; }
     int selectionStart() const { return m_selectionStart; }
@@ -58,6 +64,10 @@ public:
     QPointF mapToPage(const QPoint& widgetPos) const;
     QRectF mapRectFromPage(const QRectF& pdfRect) const;
     QRectF pageRect() const;
+
+    // Absolute widget-space rect occupied by a specific page. In continuous
+    // mode this reflects the page's position in the vertical strip.
+    QRectF pageRect(int pageIndex) const;
     
 signals:
     void pageChanged(int pageIndex);
@@ -88,21 +98,42 @@ private slots:
 private:
     void updateViewport();
     void requestRender();
+    void requestRender(int pageIndex);
+    void paintSinglePage(QPainter& painter);
+    void paintContinuous(QPainter& painter);
+    void waitForRenders();
+    void refreshVisiblePages();
+    void updateCurrentPageForViewport();
+    void drawSelectionForCurrentPage(QPainter& painter);
+    QRectF pageRectOf(int pageIndex) const;
+    QSizeF pagePixelSize(int pageIndex) const;
+    qreal continuousY(int pageIndex) const;
+    int pageAtY(qreal y, bool clamp) const;
+    int pageUnderPoint(const QPoint& widgetPos) const;
     QPointF mapFromPageF(const QPointF& pagePos) const;
+    QPointF mapFromPageOnPage(const QPointF& pagePos, int pageIndex) const;
+    QPointF mapToPageOnPage(const QPoint& widgetPos, int pageIndex) const;
+    QRectF mapRectFromPageOnPage(const QRectF& pdfRect, int pageIndex) const;
     QRectF mappedMatchRect(const QRectF& pageMatch) const;
     void clearTextSelectionState();
-    
+
     PdfDocument* m_document = nullptr;
     QImage m_currentImage;
     int m_currentPage = -1;
     int m_pageCount = 0;
     qreal m_zoom = 1.0;
     int m_rotation = 0; // 0, 90, 180, 270
+    ViewMode m_viewMode = ViewMode::SinglePage;
     
     // Panning
     QPoint m_panStart;
     QPoint m_scrollOffset;
     bool m_panning = false;
+    // Scroll "generation": bumped whenever the strip visibly moves; the
+    // viewport-center page tracker only re-runs when this changes, so paints
+    // triggered for other reasons never steal the tracked page.
+    int m_scrollVersion = 0;
+    int m_trackedScrollVersion = -1;
     
     // Text selection. The char-index pair drives the linear caret/highlight;
     // the box fields are the fallback overlay for pages with no text at all.
@@ -127,12 +158,15 @@ private:
         int rotation = 0;
     };
     QMap<int, CachedPage> m_renderCache;
-    static const int MAX_CACHE_SIZE = 10;
+    static const int MAX_CACHE_SIZE = 12;
 
-    // In-flight async render. The widget waits for it before replacing or
-    // destroying the document, because the wrapped PDFium document handles
-    // must stay alive until the render worker releases its page ref.
-    QFuture<void> m_renderFuture;
+    // In-flight async renders. A page is added to m_pendingPages while its
+    // render is queued/running so scrolling never spawns duplicate requests;
+    // the futures are joined before replacing or destroying the document,
+    // because the wrapped PDFium document handles must stay alive until each
+    // render worker releases its page ref.
+    QSet<int> m_pendingPages;
+    QList<QFuture<void>> m_renderFutures;
 };
 
 #endif // PDFVIEWERWIDGET_H

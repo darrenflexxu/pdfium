@@ -7,6 +7,7 @@
 #include <QAction>
 #include <QToolBar>
 #include <QStatusBar>
+#include <QComboBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -95,6 +96,7 @@ private:
     QAction* m_rotateCwAction = nullptr;
     QAction* m_rotateCcwAction = nullptr;
     QAction* m_selectionToolAction = nullptr;
+    QComboBox* m_viewModeCombo = nullptr;
 
     // New feature actions
     QAction* m_compressAction = nullptr;

@@ -321,6 +321,20 @@ void MainWindow::createToolBars() {
     viewToolBar->addSeparator();
     viewToolBar->addAction(m_rotateCcwAction);
     viewToolBar->addAction(m_rotateCwAction);
+    viewToolBar->addSeparator();
+    
+    m_viewModeCombo = new QComboBox(this);
+    m_viewModeCombo->setObjectName("viewModeCombo");
+    m_viewModeCombo->addItem(tr("Single Page"));
+    m_viewModeCombo->addItem(tr("Continuous"));
+    m_viewModeCombo->setToolTip(tr("Display mode"));
+    connect(m_viewModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+        m_viewer->setViewMode(index == 0
+            ? PdfViewerWidget::ViewMode::SinglePage
+            : PdfViewerWidget::ViewMode::Continuous);
+    });
+    viewToolBar->addWidget(m_viewModeCombo);
     
     // Tools toolbar (new features)
     QToolBar* toolsToolBar = addToolBar(tr("Tools"));

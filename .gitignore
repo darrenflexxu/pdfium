@@ -66,3 +66,4 @@ third_party/pdfium/
 build_debug/*
 build_xcode/*
 build_scripts/__pycache__/*
+build_release/*
