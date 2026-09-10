@@ -25,6 +25,7 @@ option(PDFIUM_BUILD_DEBUG "Build PDFium in debug mode" OFF)
 option(PDFIUM_ENABLE_XFA "Enable XFA support in PDFium" ON)
 option(PDFIUM_ENABLE_V8 "Enable V8 JavaScript engine in PDFium" OFF)
 option(PDFIUM_COMPONENT_BUILD "Build PDFium as shared library components" OFF)
+option(PDFIUM_ENABLE_PYTHON "Build Python bindings (pybind11)" ON)
 
 # Cross-compilation targets
 set(PDFIUM_TARGET_OS "" CACHE STRING "Target OS for PDFium build (win, mac, linux)")
@@ -189,6 +190,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 add_subdirectory(pdfium_extensions)
 add_subdirectory(pdfium_wrapper)
 add_subdirectory(qt_app)
+
+if(PDFIUM_ENABLE_PYTHON)
+    add_subdirectory(pdfium_python)
+endif()
 
 # ------------------------------------------------------------
 # Install (Optional)

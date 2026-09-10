@@ -137,3 +137,62 @@
   - Qt 层 `compress_qt`：`compressionProgress` 序列 0/30/60/70/90/100、起止复查通过，保存产物 235,982 B 重开 2 页成功，错误路径（不可写目录）正确走失败信号，退出码 0。
   - 回归套件全部 PASS：`bookmarks/selection/context_menu/continuous/wheel_iso/wheel_widget/two_docs/mainwin_test`。
 
+## 6. 新增需求：PDFium Python 扩展
+
+### 需求背景
+需要为 `pdfium_wrapper` 提供 Python 绑定，使得开发者可以通过 Python 脚本调用 PDF 文档的加载、渲染、文本提取、结构分析及压缩等功能。由于 `pdfium_wrapper` 基于 COM-style 接口（vtable），直接使用 `ctypes` 过于繁琐，拟采用 `pybind11` 构建高性能的编译型 Python 扩展模块。
+
+### 涉及修改的文件列表
+- `CMakeLists.txt`: 配置 `pybind11` 依赖并添加 `pdfium_python` 子目录。
+- `pdfium_python/CMakeLists.txt` (新): 定义 Python 模块构建目标。
+- `pdfium_python/bindings.cpp` (新): 实现 C++ 接口到 Python 类的映射逻辑。
+- `pdfium_python/test_pdfium.py` (新): 用于功能验证的 Python 测试脚本。
+
+### 具体执行步骤
+
+#### 步骤 1: 集成 pybind11 依赖
+- 在根目录 `CMakeLists.txt` 中使用 `FetchContent` 引入 `pybind11`。
+- 配置 Python 解释器路径，确保能够正确生成 `.so` (Linux/macOS) 或 `.pyd` (Windows) 文件。
+
+#### 步骤 2: 实现 Python 类绑定 (`bindings.cpp`)
+- **生命周期管理**: 为所有接口 (`IPdfDocument`, `IPdfPage` 等) 定义 `std::shared_ptr` 包装器，并自定义 deleter 调用 `Release()`，确保 Python 对象被回收时能正确释放 PDFium 句柄。
+- **接口映射**:
+    - `IPdfDocument` $\rightarrow$ `PdfDocument`: 映射 `GetPageCount`, `GetPage`, `GetDocumentStructure`, `Optimize`, `SaveWithCompression` 等。
+    - `IPdfPage` $\rightarrow$ `PdfPage`: 映射 `Render`, `GetText`, `SearchText`, `GetCharBox`, `GetPageElement` 等。
+    - `IPdfElement` $\rightarrow$ `PdfElement`: 映射 `GetType`, `GetBounds`, `GetElementText` 等。
+    - `IPdfOutline` $\rightarrow$ `PdfOutline`: 映射 `GetTitle`, `GetFirstChild`, `GetNextSibling`, `GetDestinationPage`。
+- **工厂函数**: 封装 `PDF_CreateDocument` 为 Python 类的构造函数或静态方法 `PdfDocument.create(path, password)`。
+- **库初始化**: 在 `PYBIND11_EMBEDDED_MODULE` 或模块初始化段调用 `PDF_InitLibrary`，并在模块卸载时调用 `PDF_DestroyLibrary`。
+
+#### 步骤 3: 构建系统集成
+- 创建 `pdfium_python/CMakeLists.txt`，使用 `pybind11_add_module` 定义目标。
+- 链接 `pdfium_wrapper` 库。
+- 确保构建产物被放置在 Python 可导入的路径下。
+
+#### 步骤 4: API 适配与优化
+- **类型转换**: 将 `PDF_CompressOptions` 等 C 结构体映射为 Python 简单的 `dict` 或 `dataclass`。
+- **内存安全**: 处理 `PDF_FreeString` 等内存释放函数，确保 Python 端的 `str` 在获取后无需用户手动释放。
+
+### 校验方式
+- **编译验证**: 执行 `cmake --build . --target pdfium_python` 成功生成模块文件。
+- **功能验证**: 编写 `test_pdfium.py` 执行以下流程：
+    1. `import pdfium` $\rightarrow$ `doc = pdfium.PdfDocument.create("test.pdf")`。
+    2. 验证 `doc.get_page_count()` 与预期一致。
+    3. 获取第一页 `page = doc.get_page(0)` $\rightarrow$ 调用 `page.get_text()` 并打印。
+    4. 调用 `doc.save_with_compression("out.pdf", options)` $\rightarrow$ 验证文件生成且可打开。
+- **内存泄漏测试**: 在循环中创建/销毁大量 `PdfDocument` 对象，观察内存占用是否稳定（验证 `Release()` 是否被正确触发）。
+
+### 完成情况
+- **步骤 1（pybind11 依赖）**：根 `CMakeLists.txt` 新增 `PDFIUM_ENABLE_PYTHON` 选项，`PDFIUM_ENABLE_PYTHON=ON` 时挂载 `pdfium_python` 子目录；`pdfium_python/CMakeLists.txt` 先 `find_package(pybind11 CONFIG QUIET)`（可用 `-Dpybind11_DIR` 指定，实测 `pybind11 3.1.0` + Homebrew Python 3.14），未找到时经 `FetchContent` 拉取 `pybind11 v3.1.0` 兜底。
+- **步骤 2（类绑定 `bindings.cpp`）**：
+  - 生命周期：所有接口以 `std::shared_ptr` + 自定义 deleter（`Release()`）持有，Python 对象回收即释放 PDFium 句柄；工厂 `PdfDocument.create(path, password="")` 封装 `PDF_CreateDocument`。
+  - 映射：`PdfDocument`（get_page_count/get_page/get_document_structure/get_outline_root/optimize/save_with_compression/get_last_compress_stats）、`PdfPage`（render→BGRA bytes、get_text、search_text、get_char_count/get_char_unicode/get_char_box、count_page_elements/get_page_element/find_elements_by_type）、`PdfElement`（type/bounds/text）、`PdfOutline`（title/first_child/next_sibling/destination_page）。
+  - 初始化：模块加载调用 `PDF_InitLibrary()`（失败抛异常），`Py_AtExit` 注册 `PDF_DestroyLibrary()` 于解释器退出。
+- **步骤 3（构建集成）**：`pybind11_add_module(pdfium_python)` 链接 `pdfium_wrapper`，输出重命名为 `pdfium`（避让根目录 `pdfium` INTERFACE 目标），产物 `build_release/bin/pdfium.cpython-314-darwin.so`（含指向 `bin/` 的 LC_RPATH，可被 `python` 直接 `import`）。
+- **步骤 4（类型转换与内存安全）**：`CompressOptions` 绑定为 Python 类（默认值对齐 `FPDF_CompressOptionsInit`）；模块级常量暴露压缩/渲染/搜索/元素标志位；`GetText/GetElementText/GetTitle` 返回的分配字符串立即 `PDF_FreeString` 后转 `std::string`。
+- **校验**：
+  - `cmake --build ... --target pdfium_python` 成功；`import pdfium` 通过。
+  - `test_pdfium.py`（604 B 手工生成 PDF）：pages=1、structure 完整、`get_text()` 29 字符、`render()` 60000 B(100×150×4)、`search_text("PDFium")` 1 命中、`optimize=True`、`save_with_compression` 成功且统计 `compressed_size` 与文件实际字节一致、输出重开页数一致、60 次创建/销毁生命周期压力测试通过，退出码 0。
+  - 说明：`find_elements_by_type(ELEMENT_TEXT)` 因元素提取扩展依赖 `BUILD_PDFIUM_FROM_SOURCE` 而定，若无源码构建可能返回空（接口调用本身正常）。
+
+
