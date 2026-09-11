@@ -90,6 +90,13 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override;
     QMenu* buildContextMenu(const QPoint& widgetPos);
     void copySelectedText();
+    // Widget-space drag rect mapped to PDF page coordinates (y-up), or an empty
+    // rect when the mapping is unavailable.
+    QRectF widgetToPageRect(const QRect& widgetRect) const;
+    // The currently selected text: plain drags use the rect-based extraction
+    // (extractTextInRect) so selection is defined by the dragged rectangle;
+    // word/paragraph multi-click and textless-page fallbacks use the char map.
+    QString selectedText() const;
     
 private slots:
     void onRenderFinished(int pageIndex, QImage image, bool success);

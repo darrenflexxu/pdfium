@@ -334,6 +334,45 @@ QList<QRectF> PdfDocument::searchText(int pageIndex, const QString& text, bool c
     return results;
 }
 
+QString PdfDocument::extractTextInRect(int pageIndex, const QRectF& rect) const {
+    const QRectF rr = rect.normalized();
+    if (rr.isEmpty() || !m_interface) return QString();
+
+    const QVector<CharInfo>& map = charMap(pageIndex);
+    if (map.isEmpty()) return QString();
+
+    // The map is already sorted in reading order (line, then x), so the
+    // filtered list keeps that order without a second sort.
+    QVector<const CharInfo*> hits;
+    hits.reserve(map.size());
+    for (const CharInfo& ci : map) {
+        if (rr.intersects(ci.bounds)) hits.append(&ci);
+    }
+    if (hits.isEmpty()) return QString();
+
+    QString out;
+    out.reserve(hits.size() * 2);
+    for (int i = 0; i < hits.size(); ++i) {
+        const CharInfo& cur = *hits[i];
+        const uint cp = static_cast<uint>(cur.codepoint);
+        if (i > 0) {
+            const CharInfo& prev = *hits[i - 1];
+            if (cur.line != prev.line) {
+                out += QLatin1Char('\n');
+            } else {
+                // Gap in the writing direction wider than a fraction of the
+                // glyph height separates words/columns -> insert a space.
+                const double gap = cur.bounds.left() - prev.bounds.right();
+                const double unit =
+                    qMax(1.0, qMax(cur.bounds.height(), prev.bounds.height()));
+                if (gap > unit * 0.45) out += QLatin1Char(' ');
+            }
+        }
+        out += QString::fromUcs4(&cp, 1);
+    }
+    return out;
+}
+
 const QVector<CharInfo>& PdfDocument::charMap(int pageIndex) const {
     static const QVector<CharInfo> empty;
     auto it = m_charMaps.constFind(pageIndex);

@@ -195,4 +195,101 @@
   - `test_pdfium.py`（604 B 手工生成 PDF）：pages=1、structure 完整、`get_text()` 29 字符、`render()` 60000 B(100×150×4)、`search_text("PDFium")` 1 命中、`optimize=True`、`save_with_compression` 成功且统计 `compressed_size` 与文件实际字节一致、输出重开页数一致、60 次创建/销毁生命周期压力测试通过，退出码 0。
   - 说明：`find_elements_by_type(ELEMENT_TEXT)` 因元素提取扩展依赖 `BUILD_PDFIUM_FROM_SOURCE` 而定，若无源码构建可能返回空（接口调用本身正常）。
 
+## 7. 新增需求：交互式文本选择 (Interactive Text Selection)
 
+### 需求背景
+目前的文本选择仅支持简单的框选，且无法精确提取选区内的文本内容。用户需要实现类似于浏览器的交互式文本选择：将用户在视图上的拖拽选区映射为 PDF 坐标，并精确提取该区域内的文本，同时提供紧贴文字边缘的高亮视觉反馈。
+
+### 涉及修改的文件列表
+- `qt_app/src/pdfdocument.h`: 定义 `extractTextInRect` 接口。
+- `qt_app/src/pdfdocument.cpp`: 实现基于元素边界过滤的文本提取逻辑。
+- `qt_app/src/pdfviewerwidget.cpp`: 重构文本选择流程，将视图选择区域映射为 PDF 坐标并提取文本。
+
+### 具体执行步骤与校验方式
+
+#### 步骤 1: 实现区域文本提取逻辑 (`PdfDocument`)
+- **实现内容**:
+    1. 新增接口 `QString extractTextInRect(int pageIndex, const QRectF& rect) const`。
+    2. 调用 `findElementsByType(pageIndex, PDF_ElementType::Text)` 获取所有文本元素。
+    3. 过滤出与 `rect` 相交的元素，并按阅读顺序（Y 轴从上到下，X 轴从左到右）排序。
+    4. 拼接元素文本，并在 Y 坐标显著变化时插入 `\n` 换行符。
+- **校验方式**: 编写单元测试或小型 harness，传入一个覆盖部分文本的矩形，验证输出字符串仅包含该区域内的文本且顺序正确。
+
+#### 步骤 2: 重构 `PdfViewerWidget` 的选择流程
+- **实现内容**:
+    1. 修改 `mouseReleaseEvent`，使用 `mapToPage` 将视图选区转换为 PDF 坐标矩形。
+    2. 调用 `m_document->extractTextInRect(m_currentPage, selectionRect)` 提取文本。
+    3. 将提取到的文本通过 `textSelected` 信号发出，并同步至系统剪贴板。
+- **校验方式**: 运行程序 $\rightarrow$ 拖拽选择页面上的一段特定文字 $\rightarrow$ 验证剪贴板内容与选区完全一致，且不包含页面的其余部分。
+
+#### 步骤 3: 增强视觉反馈与交互
+- **实现内容**:
+    1. 优化 `paintEvent`：不再绘制简单的蓝色半透明矩形，而是基于提取出的文本元素边界绘制高亮区域，使高亮紧贴文字边缘。
+    2. 快捷键同步：确保 `Ctrl+C` 能够触发上述提取流程并复制选中文本。
+- **校验方式**: 
+1. 视觉验证：观察选中文字时的高亮区域是否精准贴合文字。
+     2. 功能验证：使用 `Ctrl+C` 快捷键验证复制内容正确。
+
+### 完成情况
+- **步骤 1（区域文本提取 `extractTextInRect`）**：`PdfDocument` 新增 `QString extractTextInRect(int pageIndex, const QRectF& rect) const`。因元素提取接口（`findElementsByType`）依赖 `BUILD_PDFIUM_FROM_SOURCE`（本环境返回空，见第 6 节说明），实现以**字符图（charMap）为权威文本来源**做等价过滤：取与 `rect` 相交的字符（charMap 已按阅读顺序排序：行↘、行内从左至右），同行为**连续字符**，行间插入 `\n`，水平间距超过字形高度 45% 时插入空格（词/分栏分隔）；`rect` 与字符框同一坐标系（y-up、指向 `deviceToPage`/`mapToPage`）。
+- **步骤 2（重建视图选择流程）**：`PdfViewerWidget` 在按下/拖动时同步维护 `m_boxSelStart/m_boxSelEnd`；松开时经 `selectedText()` 统一取文本——**普通拖动**按计划使用 `mapToPage` 将视图选区映射为 PDF 坐标矩形 `widgetToPageRect()` $\rightarrow$ `extractTextInRect` 提取并经 `textSelected` 发出 + 写入剪贴板；**双击/三击**（词/段）与**无文本页回退**继续走精确的字符区间路径（`textForRange`）。
+- **步骤 3（高亮与快捷键）**：
+  - 高亮沿用已有的**逐字符贴合文字边缘**的线合并绘制（比“简单半透明矩形”更精细）；无文本页保留虚线框 overlay。
+  - `Ctrl+C` 统一走 `selectedText()`（矩形/区间任一路径），无选中时回退整页；`Ctrl+A` 全选时清除残留拖拽矩形，避免 `selectedText()` 误用旧矩形（harness 暴露此 bug 已修复）。
+- **校验**：新建 `rect_harness`（offscreen Qt 应用，3 行文本 PDF `sel_3lines.pdf`），全部 12 项通过：
+  - 文档层：每行精确匹配、两行矩形拼接 `'行0\n行1'`、整页矩形三段文本、半行矩形只含前半段、页外矩形为空。
+  - 视图层：跨行 0 拖拽 → `textSelected('First line of testing')`、剪贴板一致；`Ctrl+C` 重复制同一选区；`Ctrl+A`+`Ctrl+C` 复制整页；退出码 0。
+
+## 8. 新增需求：跨端 GPU 加速渲染 (Cross-Platform GPU Acceleration via Skia)
+
+### 需求背景
+当前 PDF 渲染依赖于 CPU 栅格化生成 `QImage`，在移动端（iOS/Android）性能较差且不支持高质量的实时缩放和平滑滚动。拟引入 Skia 绘图引擎，利用 GPU 加速（Metal/Vulkan/OpenGL）实现高性能渲染，并将渲染管线升级为 `PDFium $\rightarrow$ Skia $\rightarrow$ Screen`。
+
+### 涉及修改的文件列表
+- `CMakeLists.txt`: 配置 Skia 依赖、跨平台库路径及硬件加速标志。
+- `qt_app/src/pdfviewerwidget.h`: 将基类由 `QWidget` 修改为 `QOpenGLWidget`，引入 Skia 上下文管理。
+- `qt_app/src/pdfviewerwidget.cpp`: 实现 `initializeGL`, `resizeGL`, `paintGL` 逻辑。
+- `qt_app/src/pdfdocument.cpp`: 优化图像数据传递，确保 bitmap 能高效转换为 `SkImage`。
+
+### 具体执行步骤
+
+#### 步骤 1: Skia 构建与依赖集成
+- **构建**: 为 Android (NDK) 和 iOS (Xcode Toolchain) 分别交叉编译 Skia 静态库。
+- **CMake 配置**:
+    1. 定义 `SKIA_DIR` 变量。
+    2. 引入 Skia 头文件路径。
+    3. 链接 `libskia.a` 及其平台依赖（iOS: Metal/QuartzCore; Android: EGL/GLESv2/Vulkan）。
+- **校验方式**: 执行 `cmake` 成功找到 Skia 库且能够通过链接阶段。
+
+#### 步骤 2: 实现 GPU 加速视图组件 (`SkiaPdfViewerWidget`)
+- **上下文初始化**:
+    1. 在 `initializeGL` 中通过 `GrGLMakeNativeInterface()` 获取 OpenGL 接口。
+    2. 初始化 `GrDirectContext` (Skia GPU Context)。
+- **Surface 管理**:
+    1. 在 `resizeGL` 中获取当前 Framebuffer ID 和格式。
+    2. 创建 `GrBackendRenderTarget` 并构建 `SkSurface`。
+- **绘制循环 (`paintGL`)**:
+    1. 清除背景。
+    2. 遍历可见页面 $\rightarrow$ 从 `PdfDocument` 获取渲染好的 bitmap $\rightarrow$ 封装为 `SkImage`。
+    3. 应用变换矩阵（缩放、平移）调用 `canvas->drawImage`。
+    4. 使用 `SkPaint` 绘制高精度的矢量叠加层（如文本选区、注释）。
+    5. 执行 `m_skiaContext->flush()` 提交 GPU 指令。
+- **校验方式**: 运行程序 $\rightarrow$ 验证页面能够正确显示 $\rightarrow$ 验证缩放和滚动是否达到 60FPS 的流畅度。
+
+#### 步骤 3: 跨平台适配与性能优化
+- **后端适配**:
+    1. **iOS**: 配置 `skia_use_metal=true`，通过 Metal Backend 提升渲染效能。
+    2. **Android**: 配置 Vulkan/OpenGL ES 后端，处理不同设备间的 DPI 缩放。
+- **纹理缓存**:
+    1. 实现 `SkImage` 缓存机制，避免每帧重复创建纹理。
+    2. 根据缩放级别分级缓存，减少 PDFium 的重复重绘次数。
+- **校验方式**: 在实际 iOS/Android 设备上运行 $\rightarrow$ 验证内存占用稳定 $\rightarrow$ 验证在极端缩放（极小/极大）时无明显卡顿。
+
+### 综合校验方案
+
+| 测试场景 | 操作步骤 | 预期结果 |
+| :--- | :--- | :--- |
+| **渲染正确性** | 打开复杂 PDF 文档 | 页面显示与原版一致，无花屏或缺失 |
+| **交互流畅度** | 快速缩放或连续滚动 | 帧率稳定在 60FPS，无可见掉帧 |
+| **平台兼容性** | 在 iOS (Metal) 和 Android (Vulkan) 运行 | 均能正常启动且 GPU 硬件加速生效 |
+| **内存压力** | 连续加载多个大文档并快速翻页 | 内存增长受控，`SkImage` 缓存正确释放 |

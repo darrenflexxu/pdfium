@@ -465,7 +465,7 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
                 if (idx >= 0 && m_document->charMap(m_currentPage).size() > 0) {
                     m_cursorIndex = idx;
                     m_selectionStart = m_selectionEnd = idx;
-                    m_boxSelStart = m_boxSelEnd = QPoint();
+                    m_boxSelStart = m_boxSelEnd = event->pos();
 
                     // Word / paragraph expansion on multi-click (step 4).
                     if (m_clickCount == 2) {
@@ -552,18 +552,17 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
             event->accept();
         } else if (m_selecting) {
             m_selecting = false;
-            // Extract selected text from the char-index range.
-            const int a = qMin(m_selectionStart, m_selectionEnd);
-            const int b = qMax(m_selectionStart, m_selectionEnd);
-            if (m_document && m_currentPage >= 0 && a >= 0 && b > a) {
-                QString selectedText = m_document->textForRange(m_currentPage, a, b);
-                if (!selectedText.isEmpty()) {
-                    emit textSelected(selectedText);
-                    QApplication::clipboard()->setText(selectedText);
-                    emit statusMessage(QString("Selected %1 chars: %2")
-                                           .arg(b - a)
-                                           .arg(selectedText.simplified()));
-                }
+            // Plain drags are defined by the dragged rectangle: the widget
+            // selection rect is mapped to PDF coordinates and its exact text is
+            // extracted via extractTextInRect. Word/paragraph multi-clicks keep
+            // the (more precise) char-range path.
+            QString selectedText = this->selectedText();
+            if (!selectedText.isEmpty()) {
+                emit textSelected(selectedText);
+                QApplication::clipboard()->setText(selectedText);
+                emit statusMessage(QString("Selected %1 chars: %2")
+                                       .arg(selectedText.length())
+                                       .arg(selectedText.simplified()));
             }
             update();
             event->accept();
@@ -620,16 +619,44 @@ QMenu* PdfViewerWidget::buildContextMenu(const QPoint& widgetPos) {
 void PdfViewerWidget::copySelectedText() {
     if (!m_document || m_currentPage < 0)
         return;
-    const int a = qMin(m_selectionStart, m_selectionEnd);
-    const int b = qMax(m_selectionStart, m_selectionEnd);
-    if (a < 0 || b <= a)
-        return;
-    const QString text = m_document->textForRange(m_currentPage, a, b);
+    const QString text = selectedText();
     if (text.isEmpty())
         return;
     QApplication::clipboard()->setText(text);
     emit textSelected(text);
     emit statusMessage("Text copied to clipboard");
+}
+
+QRectF PdfViewerWidget::widgetToPageRect(const QRect& widgetRect) const {
+    if (!m_document || m_currentPage < 0)
+        return QRectF();
+    const QPointF p1 = mapToPage(widgetRect.topLeft());
+    const QPointF p2 = mapToPage(widgetRect.bottomRight());
+    return QRectF(p1, p2).normalized();
+}
+
+QString PdfViewerWidget::selectedText() const {
+    if (!m_document || !m_document->isLoaded() || m_currentPage < 0)
+        return QString();
+
+    const int a = qMin(m_selectionStart, m_selectionEnd);
+    const int b = qMax(m_selectionStart, m_selectionEnd);
+    const bool plainDrag = m_clickCount <= 1;
+
+    // Plain drag: define the selection by the dragged rectangle.
+    QString text;
+    if (plainDrag && !m_boxSelStart.isNull() && !m_boxSelEnd.isNull()) {
+        const QRectF pageSel = widgetToPageRect(
+            QRect(m_boxSelStart, m_boxSelEnd).normalized());
+        if (!pageSel.isEmpty()) {
+            text = m_document->extractTextInRect(m_currentPage, pageSel);
+        }
+    }
+    // Finger stretch / no-rect or empty-result fallback: char-range selection.
+    if (text.isEmpty() && a >= 0 && b > a) {
+        text = m_document->textForRange(m_currentPage, a, b);
+    }
+    return text;
 }
 
 void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
@@ -676,14 +703,10 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
             break;
         case Qt::Key_C:
             if (event->modifiers() & Qt::ControlModifier && m_textSelectionEnabled) {
-                const int a = qMin(m_selectionStart, m_selectionEnd);
-                const int b = qMax(m_selectionStart, m_selectionEnd);
-                QString text;
-                if (m_document && a >= 0 && b > a) {
-                    text = m_document->textForRange(m_currentPage, a, b);
-                }
+                // Copy the active selection (rect- or char-based), falling back
+                // to the whole page when nothing is selected.
+                QString text = m_document ? selectedText() : QString();
                 if (text.isEmpty()) {
-                    // Fallback: whole page.
                     text = m_document->getPageText(m_currentPage);
                 }
                 if (!text.isEmpty()) {
@@ -700,6 +723,9 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
                         m_selectionStart = 0;
                         m_selectionEnd = cm.size();
                         m_cursorIndex = cm.size();
+                        // A whole-page selection is a char-range selection; drop
+                        // any stale drag rect so selectedText() doesn't reuse it.
+                        m_boxSelStart = m_boxSelEnd = QPoint();
                         update();
                         emit statusMessage(QString("Selected all %1 chars").arg(cm.size()));
                     }

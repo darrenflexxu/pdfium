@@ -65,6 +65,14 @@ public:
     // Text extraction
     QString getPageText(int pageIndex) const;
     QList<QRectF> searchText(int pageIndex, const QString& text, bool caseSensitive = false);
+    // Extracts the text of every character whose box intersects `rect`.
+    // `rect` is in PDF page coordinates (y-up, bottom-left origin, the same
+    // convention as charMap bounds / deviceToPage). Characters are joined in
+    // reading order (top-to-bottom, then left-to-right): a horizontal gap wider
+    // than a fraction of the glyph height inserts a space (word/column
+    // separation) and a change of line inserts '\n'. Returns an empty string
+    // for pages without selectable text.
+    QString extractTextInRect(int pageIndex, const QRectF& rect) const;
 
     // Character map (linear text selection). Lazily built per page and cached;
     // chars are sorted in reading order (top-to-bottom, then left-to-right).
