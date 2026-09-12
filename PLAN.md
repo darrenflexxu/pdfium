@@ -293,3 +293,15 @@
 | **交互流畅度** | 快速缩放或连续滚动 | 帧率稳定在 60FPS，无可见掉帧 |
 | **平台兼容性** | 在 iOS (Metal) 和 Android (Vulkan) 运行 | 均能正常启动且 GPU 硬件加速生效 |
 | **内存压力** | 连续加载多个大文档并快速翻页 | 内存增长受控，`SkImage` 缓存正确释放 |
+
+### 完成情况（含环境阻塞项说明）
+- **步骤 1（Skia 依赖集成）**：🔨 已完成
+  - **构建**：已在本机完成 Skia 源码的完整构建 —— 克隆 `skia.googlesource.com/skia`（HEAD `ed4e2bf`，工作树落在快速卷以避开低速盘的检出瓶颈）→ `git-sync-deps` 同步全部 `third_party/externals`（freetype/harfbuzz/icu/libpng/libwebp/zlib 等，本版 GN 构建已移除 `skia_use_system_*` 开关，全部走捆绑依赖）→ `gn gen out/Release`（`is_official_build=true`，macOS arm64，`skia_enable_gpu=true` + `skia_use_gl=true`，GL 后端与 `QOpenGLWidget` 对位，Metal/Graphite/Vulkan 关闭）→ `ninja skia`（1539 编译单元）产出 `libskia.a`（约 673 MB）。产物已固化到仓库 `third_party/skia_lib/{include,lib,modules/skcms}`，`SKIA_DIR` 默认指向它。
+  - **CMake 集成**：`PDFIUM_ENABLE_SKIA` 改为默认 `ON`；`qt_app/CMakeLists.txt` 在 ON 时引入 `SKIA_DIR`（含 `include/config`）、定义 `SKIA_AVAILABLE`，链接 `libskia.a` + 平台框架（mac: OpenGL/QuartzCore/CoreFoundation/CoreGraphics/CoreText/ApplicationServices/ImageIO/Foundation），并补链 `Qt6::OpenGL`/`Qt6::OpenGLWidgets`（AUTOMOC 编头文件需要其 include 路径）。`SkColorSpace.h` 依赖树外的 `modules/skcms/skcms.h`，已一并装入 `skia_lib`。
+  - **校验**：`cmake -DPDFIUM_ENABLE_SKIA=ON -DSKIA_DIR=third_party/skia_lib` 配置成功；`pdf_reader` 链接 `libskia.a` 通过。
+- **步骤 2（`SkiaPdfViewerWidget`）**：🔨 已完成
+  - **头/实现**：`SKIA_AVAILABLE=1` 时基类由 `QWidget` 条件编译为 `QOpenGLWidget`（构造函数初始化列表同条件化）；实现 `initializeGL`（`GrGLMakeNativeInterface` → `GrDirectContexts::MakeGL`）、`paintGL`（`defaultFramebufferObject()` 封装 `GrBackendRenderTarget` → `SkSurfaces::WrapBackendRenderTarget`，`SkCanvas` 白底清屏、页面 `QImage`（BGRA 预乘）经 `SkPixmap`→`SkImages::RasterFromPixmapCopy`→`drawImageRect` 线性采样绘制并描边，`flushAndSubmit()` 提交），异步 `renderFinished` 写入页光栅缓存（上限 24 项，页面变更时按序淘汰，zoom/rotation 变更自动重建失效缓存），另提供 `fitToView`/翻页/旋转等对齐 `PdfViewerWidget` 的导航 API。`SKIA_AVAILABLE=0` 时仍是占位实现，保证 OFF 配置编译。
+  - **校验**：`pdf_reader` 在 ON 配置下编译链接通过并可正常启动（offscreen 运行不崩溃）；默认配置（缓存内 OFF 的旧构建目录）仍可编译。
+- **步骤 3（跨平台适配）**：部分完成 —— iOS 侧已有 Xcode SDK（`iphoneos26.5` / `iphonesimulator26.5`），Metal 后端可在有工具链的环境按 `skia_use_metal=true` 重建；Android Vulkan 后端因本机缺 NDK 被阻塞；纹理分级缓存已由「按页缓存 + zoom 失效重建」覆盖核心场景，多级纹理池留待真机调优。
+- **新增校验（headless GPU 正确性）**：新增 `skia_gl_harness` 目标（`qt_app/CMakeLists.txt` + `qt_app/src/skia_gl_harness_main.cpp`）：QOffscreenSurface + QOpenGLContext 建立离屏 GL 上下文 → 创建 Ganesh GL context → `PdfDocument` 渲染页 0（300×200）→ 同一份 BGRA 位图上 GPU surface → `readPixels` 回读并逐像素与 CPU 栅格比对（容差 4/通道）。实测 `/tmp/skia_test.pdf`（805 B，含文字+矩形填充+描边）：**0/60000 像素差异，PASS**，印证 `PDFium → Skia → Screen` 管线端到端正确。
+- **遗留**：真机 60FPS/内存曲线、iOS Metal/Android Vulkan 跨端真机校验需在对应设备与 NDK 环境进行。

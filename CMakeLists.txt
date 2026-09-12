@@ -26,6 +26,10 @@ option(PDFIUM_ENABLE_XFA "Enable XFA support in PDFium" ON)
 option(PDFIUM_ENABLE_V8 "Enable V8 JavaScript engine in PDFium" OFF)
 option(PDFIUM_COMPONENT_BUILD "Build PDFium as shared library components" OFF)
 option(PDFIUM_ENABLE_PYTHON "Build Python bindings (pybind11)" ON)
+option(PDFIUM_ENABLE_SKIA "Build Skia GPU acceleration (uses SKIA_DIR)" ON)
+option(BUILD_SKIA_FROM_SOURCE "Build Skia from source" OFF)
+set(SKIA_DIR "${CMAKE_SOURCE_DIR}/third_party/skia_lib" CACHE PATH "Root of a local Skia SDK (includes + lib/libskia.a)")
+set(SKIA_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/skia" CACHE PATH "Path to Skia source")
 
 # Cross-compilation targets
 set(PDFIUM_TARGET_OS "" CACHE STRING "Target OS for PDFium build (win, mac, linux)")
@@ -104,6 +108,25 @@ target_link_libraries(pdfium INTERFACE
     $<$<CONFIG:Debug>:${PDFIUM_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${PDFIUM_LIB_RELEASE}>
 )
+
+# ------------------------------------------------------------
+# Skia External Project (build from source)
+# ------------------------------------------------------------
+if(BUILD_SKIA_FROM_SOURCE)
+    message(STATUS "Skia: Building from source (${PDFIUM_TARGET_OS}/${PDFIUM_TARGET_CPU})")
+
+    set(SKIA_DIR ${SKIA_SOURCE_DIR} CACHE PATH "Root of a local Skia SDK")
+
+    add_custom_target(skia_build
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/build_scripts/build_skia.py
+                --target-os ${PDFIUM_TARGET_OS}
+                --target-cpu ${PDFIUM_TARGET_CPU}
+                --root ${CMAKE_SOURCE_DIR}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Building Skia GPU acceleration library"
+        VERBATIM
+    )
+endif()
 
 # ------------------------------------------------------------
 # PDFium External Project (build from source)
@@ -215,3 +238,8 @@ add_custom_target(pdfium_list_configs
     COMMAND ${Python3_EXECUTABLE} ${PDFIUM_BUILD_SCRIPT} --list-configs
     COMMENT "Listing supported PDFium build configurations"
 )
+
+if(BUILD_SKIA_FROM_SOURCE AND PDFIUM_ENABLE_SKIA)
+    # Ensure pdf_reader is built after skia_build
+    add_dependencies(pdf_reader skia_build)
+endif()

@@ -45,15 +45,9 @@ CTestTestfile.cmake
 .DS_Store
 Thumbs.db
 
-# PDFium binaries (downloaded separately)
-third_party/pdfium/bin/*.dll
-third_party/pdfium/lib/*.lib
-third_party/pdfium/include/
-!third_party/pdfium/include/.gitkeep
-
 # PDFium SDK source + depot_tools (downloaded/synced by bootstrap scripts)
 depot_tools/
-third_party/pdfium/
+third_party/*
 
 # Distribution
 *.zip
@@ -67,3 +61,4 @@ build_debug/*
 build_xcode/*
 build_scripts/__pycache__/*
 build_release/*
+build_skia/*
