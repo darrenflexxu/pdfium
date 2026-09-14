@@ -9,49 +9,53 @@
 #include <QSet>
 #include <QFuture>
 
+#include "abstractpdfviewer.h"
+
 class PdfDocument;
 class QMenu;
 class QContextMenuEvent;
 
-class PdfViewerWidget : public QWidget {
+class PdfViewerWidget : public QWidget, public AbstractPdfViewer {
     Q_OBJECT
 public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override;
+
+    QWidget* widget() const override { return const_cast<PdfViewerWidget*>(this); }
+
+    void setDocument(PdfDocument* document) override;
+    PdfDocument* document() const override { return m_document; }
+    void setPage(int pageIndex) override;
+    void setZoom(qreal zoom) override;
+    void setRotation(int rotation) override;
     
-    void setDocument(PdfDocument* document);
-    PdfDocument* document() const { return m_document; }
-    void setPage(int pageIndex);
-    void setZoom(qreal zoom);
-    void setRotation(int rotation);
-    
-    int currentPage() const { return m_currentPage; }
-    int pageCount() const { return m_pageCount; }
-    qreal zoom() const { return m_zoom; }
-    int rotation() const { return m_rotation; }
+    int currentPage() const override { return m_currentPage; }
+    int pageCount() const override { return m_pageCount; }
+    qreal zoom() const override { return m_zoom; }
+    int rotation() const override { return m_rotation; }
     
     // File operations
-    bool loadFile(const QString& filePath, const QString& password = QString());
+    bool loadFile(const QString& filePath, const QString& password = QString()) override;
     
     // Navigation
-    void goToNextPage();
-    void goToPrevPage();
-    void goToFirstPage();
-    void goToLastPage();
-    void zoomIn();
-    void zoomOut();
-    void zoomToFit();
-    void zoomToWidth();
-    void rotateClockwise();
-    void rotateCounterClockwise();
+    void goToNextPage() override;
+    void goToPrevPage() override;
+    void goToFirstPage() override;
+    void goToLastPage() override;
+    void zoomIn() override;
+    void zoomOut() override;
+    void zoomToFit() override;
+    void zoomToWidth() override;
+    void rotateClockwise() override;
+    void rotateCounterClockwise() override;
     
-    // Text selection (future)
-    void setTextSelectionEnabled(bool enabled);
+    // Text selection
+    void setTextSelectionEnabled(bool enabled) override;
+    bool isTextSelectionEnabled() const override { return m_textSelectionEnabled; }
 
     // Display modes: single page at a time, or all pages in a vertical strip.
-    enum class ViewMode { SinglePage, Continuous };
-    void setViewMode(ViewMode mode);
-    ViewMode viewMode() const { return m_viewMode; }
+    void setViewMode(ViewMode mode) override;
+    ViewMode viewMode() const override { return m_viewMode; }
 
     // Linear text-selection state (char map indices).
     int cursorCharIndex() const { return m_cursorIndex; }
@@ -61,13 +65,13 @@ public:
     
     // Coordinate mapping (PDF page space <-> widget pixels, rotation-aware)
     QPoint mapFromPage(const QPointF& pagePos) const;
-    QPointF mapToPage(const QPoint& widgetPos) const;
+    QPointF mapToPage(const QPoint& widgetPos) const override;
     QRectF mapRectFromPage(const QRectF& pdfRect) const;
-    QRectF pageRect() const;
+    QRectF pageRect() const override;
 
     // Absolute widget-space rect occupied by a specific page. In continuous
     // mode this reflects the page's position in the vertical strip.
-    QRectF pageRect(int pageIndex) const;
+    QRectF pageRect(int pageIndex) const override;
     
 signals:
     void pageChanged(int pageIndex);

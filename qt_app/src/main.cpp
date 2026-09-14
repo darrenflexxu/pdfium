@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QDebug>
+#include <QTimer> // [PROBE] temp
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -38,10 +39,11 @@ int main(int argc, char* argv[]) {
         QString filePath = args.first();
         QFileInfo fi(filePath);
         if (fi.exists() && fi.isFile()) {
-            // We need to load the file in the viewer
-            // For now, just show the window - the viewer needs a public loadFile method
-            // This would be added to PdfViewerWidget
             qDebug() << "Opening file:" << filePath;
+            // [PROBE] temp: auto-open + auto-toggle to GPU after show.
+            QTimer::singleShot(0, &window, [&window, filePath]() {
+                window.probeAutoToggle(filePath);
+            });
         }
     }
     

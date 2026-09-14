@@ -13,6 +13,7 @@ add_executable(pdf_reader
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/abstractpdfviewer.h
     src/pdfviewerwidget.cpp
     src/pdfviewerwidget.h
     src/pdfdocument.cpp
@@ -132,6 +133,57 @@ if(PDFIUM_ENABLE_SKIA AND NOT IOS AND NOT ANDROID)
     )
     if(APPLE)
         target_link_libraries(skia_gl_harness PRIVATE
+            "-framework OpenGL"
+            "-framework QuartzCore"
+            "-framework CoreFoundation"
+            "-framework CoreGraphics"
+            "-framework CoreText"
+            "-framework ApplicationServices"
+            "-framework ImageIO"
+            "-framework Foundation"
+        )
+    endif()
+endif()
+
+# ------------------------------------------------------------
+# TEMPORARY: gpu_probe - real-window GPU widget blank-screen diagnostics.
+# REMOVE before shipping (crutches for this session only).
+# ------------------------------------------------------------
+if(PDFIUM_ENABLE_SKIA AND NOT IOS AND NOT ANDROID)
+    add_executable(gpu_probe
+        src/gpu_probe_main.cpp
+        src/skiapdfviewerwidget.cpp
+        src/skiapdfviewerwidget.h
+        src/pdfviewerwidget.cpp
+        src/pdfviewerwidget.h
+        src/pdfdocument.cpp
+        src/pdfdocument.h
+    )
+    set_target_properties(gpu_probe PROPERTIES
+        AUTOMOC ON
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_include_directories(gpu_probe PRIVATE
+        ${SKIA_DIR}
+        ${SKIA_DIR}/include
+        ${SKIA_DIR}/include/config
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/pdfium_wrapper/include
+    )
+    target_compile_definitions(gpu_probe PRIVATE SKIA_AVAILABLE=1)
+    target_link_libraries(gpu_probe PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        Qt6::Concurrent
+        Qt6::OpenGL
+        Qt6::OpenGLWidgets
+        pdfium_wrapper
+        ${SKIA_DIR}/lib/libskia.a
+    )
+    if(APPLE)
+        target_link_libraries(gpu_probe PRIVATE
             "-framework OpenGL"
             "-framework QuartzCore"
             "-framework CoreFoundation"

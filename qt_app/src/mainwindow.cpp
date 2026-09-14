@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "pdfviewerwidget.h"
+#include "skiapdfviewerwidget.h"
 #include "pdfdocument.h"
 #include <QApplication>
 #include <QClipboard>
@@ -27,15 +28,18 @@
 #include <QTextEdit>
 #include <QFontDatabase>
 #include <QDebug>
+#include <QTimer> // [PROBE] temp
 
 #include "pdfium_wrapper.h"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    // Central widget: PDF Viewer
-    m_viewer = new PdfViewerWidget(this);
-    setCentralWidget(m_viewer);
+    // Central widget: single viewer, switched via the same AbstractPdfViewer*
+    // when GPU acceleration is toggled. The PDF document is shared and owned
+    // by this window, and is (re)attached on every renderer switch.
+    m_viewer = createViewer(/* gpu */ true);
+    setCentralWidget(m_viewer->widget());
+    m_gpuActive = true;
     
-    // Document model
     PdfDocument* doc = new PdfDocument(this);
     m_viewer->setDocument(doc);
     
@@ -44,17 +48,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createToolBars();
     createStatusBar();
     createBookmarksPanel();
-    
-    // Connect viewer signals
-    connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
-    connect(m_viewer, &PdfViewerWidget::zoomChanged, this, &MainWindow::onZoomChanged);
-    connect(m_viewer, &PdfViewerWidget::rotationChanged, this, &MainWindow::onRotationChanged);
-    connect(m_viewer, &PdfViewerWidget::pageCountChanged, this, &MainWindow::onPageCountChanged);
-    connect(m_viewer, &PdfViewerWidget::statusMessage, this, &MainWindow::onStatusMessage);
-    connect(m_viewer, &PdfViewerWidget::textSelected, this, &MainWindow::onTextSelected);
-    
-    // Rebuild the bookmarks tree whenever a document is (re)loaded
-    connect(m_viewer, &PdfViewerWidget::pageCountChanged, this, &MainWindow::rebuildBookmarks);
+
+    setupViewerConnections(m_viewer);
     
     // Connect document signals for new features
     PdfDocument* currentDoc = m_viewer->document();
@@ -73,6 +68,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     restoreState(settings.value("windowState").toByteArray());
     
     updateActions();
+}
+
+void MainWindow::setupViewerConnections(AbstractPdfViewer* viewer) {
+    connect(viewer->widget(), SIGNAL(pageChanged(int)), this, SLOT(onPageChanged(int)));
+    connect(viewer->widget(), SIGNAL(zoomChanged(qreal)), this, SLOT(onZoomChanged(qreal)));
+    connect(viewer->widget(), SIGNAL(rotationChanged(int)), this, SLOT(onRotationChanged(int)));
+    connect(viewer->widget(), SIGNAL(pageCountChanged(int)), this, SLOT(onPageCountChanged(int)));
+    connect(viewer->widget(), SIGNAL(statusMessage(QString)), this, SLOT(onStatusMessage(QString)));
+    connect(viewer->widget(), SIGNAL(textSelected(QString)), this, SLOT(onTextSelected(QString)));
+
+    // Rebuild the bookmarks tree whenever a document is (re)loaded
+    connect(viewer->widget(), SIGNAL(pageCountChanged(int)), this, SLOT(rebuildBookmarks()));
+}
+
+AbstractPdfViewer* MainWindow::createViewer(bool gpu) {
+#ifdef SKIA_AVAILABLE
+    if (gpu)
+        return new SkiaPdfViewerWidget(this);
+#endif
+    return new PdfViewerWidget(this);
 }
 
 MainWindow::~MainWindow() {
@@ -114,58 +129,67 @@ void MainWindow::createActions() {
     m_prevPageAction = new QAction(QIcon::fromTheme("go-previous"), tr("&Previous Page"), this);
     m_prevPageAction->setShortcut(QKeySequence::MoveToPreviousPage);
     m_prevPageAction->setStatusTip(tr("Go to previous page"));
-    connect(m_prevPageAction, &QAction::triggered, m_viewer, &PdfViewerWidget::goToPrevPage);
+    connect(m_prevPageAction, &QAction::triggered, this, &MainWindow::goToPrevPageSlot);
     
     m_nextPageAction = new QAction(QIcon::fromTheme("go-next"), tr("&Next Page"), this);
     m_nextPageAction->setShortcut(QKeySequence::MoveToNextPage);
     m_nextPageAction->setStatusTip(tr("Go to next page"));
-    connect(m_nextPageAction, &QAction::triggered, m_viewer, &PdfViewerWidget::goToNextPage);
+    connect(m_nextPageAction, &QAction::triggered, this, &MainWindow::goToNextPageSlot);
     
     m_firstPageAction = new QAction(QIcon::fromTheme("go-first"), tr("&First Page"), this);
     m_firstPageAction->setShortcut(Qt::Key_Home);
     m_firstPageAction->setStatusTip(tr("Go to first page"));
-    connect(m_firstPageAction, &QAction::triggered, m_viewer, &PdfViewerWidget::goToFirstPage);
+    connect(m_firstPageAction, &QAction::triggered, this, &MainWindow::goToFirstPageSlot);
     
     m_lastPageAction = new QAction(QIcon::fromTheme("go-last"), tr("&Last Page"), this);
     m_lastPageAction->setShortcut(Qt::Key_End);
     m_lastPageAction->setStatusTip(tr("Go to last page"));
-    connect(m_lastPageAction, &QAction::triggered, m_viewer, &PdfViewerWidget::goToLastPage);
+    connect(m_lastPageAction, &QAction::triggered, this, &MainWindow::goToLastPageSlot);
     
     // View actions
     m_zoomInAction = new QAction(QIcon::fromTheme("zoom-in"), tr("Zoom &In"), this);
     m_zoomInAction->setShortcut(QKeySequence::ZoomIn);
     m_zoomInAction->setStatusTip(tr("Zoom in"));
-    connect(m_zoomInAction, &QAction::triggered, m_viewer, &PdfViewerWidget::zoomIn);
+    connect(m_zoomInAction, &QAction::triggered, this, &MainWindow::zoomInSlot);
     
     m_zoomOutAction = new QAction(QIcon::fromTheme("zoom-out"), tr("Zoom &Out"), this);
     m_zoomOutAction->setShortcut(QKeySequence::ZoomOut);
     m_zoomOutAction->setStatusTip(tr("Zoom out"));
-    connect(m_zoomOutAction, &QAction::triggered, m_viewer, &PdfViewerWidget::zoomOut);
+    connect(m_zoomOutAction, &QAction::triggered, this, &MainWindow::zoomOutSlot);
     
     m_zoomFitAction = new QAction(QIcon::fromTheme("zoom-fit-best"), tr("Fit &Page"), this);
     m_zoomFitAction->setShortcut(Qt::CTRL | Qt::Key_0);
     m_zoomFitAction->setStatusTip(tr("Fit page to window"));
-    connect(m_zoomFitAction, &QAction::triggered, m_viewer, &PdfViewerWidget::zoomToFit);
+    connect(m_zoomFitAction, &QAction::triggered, this, &MainWindow::zoomToFitSlot);
     
     m_zoomWidthAction = new QAction(QIcon::fromTheme("zoom-fit-width"), tr("Fit &Width"), this);
     m_zoomWidthAction->setShortcut(Qt::CTRL | Qt::Key_9);
     m_zoomWidthAction->setStatusTip(tr("Fit width to window"));
-    connect(m_zoomWidthAction, &QAction::triggered, m_viewer, &PdfViewerWidget::zoomToWidth);
+    connect(m_zoomWidthAction, &QAction::triggered, this, &MainWindow::zoomToWidthSlot);
     
     m_rotateCwAction = new QAction(QIcon::fromTheme("object-rotate-right"), tr("Rotate &Clockwise"), this);
     m_rotateCwAction->setShortcut(Qt::CTRL | Qt::Key_R);
     m_rotateCwAction->setStatusTip(tr("Rotate page clockwise"));
-    connect(m_rotateCwAction, &QAction::triggered, m_viewer, &PdfViewerWidget::rotateClockwise);
+    connect(m_rotateCwAction, &QAction::triggered, this, &MainWindow::rotateCwSlot);
     
     m_rotateCcwAction = new QAction(QIcon::fromTheme("object-rotate-left"), tr("Rotate &Counterclockwise"), this);
     m_rotateCcwAction->setShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_R);
     m_rotateCcwAction->setStatusTip(tr("Rotate page counterclockwise"));
-    connect(m_rotateCcwAction, &QAction::triggered, m_viewer, &PdfViewerWidget::rotateCounterClockwise);
+    connect(m_rotateCcwAction, &QAction::triggered, this, &MainWindow::rotateCcwSlot);
 
     m_selectionToolAction = new QAction(QIcon::fromTheme("edit-select"), tr("&Selection Tool"), this);
     m_selectionToolAction->setCheckable(true);
     m_selectionToolAction->setStatusTip(tr("Toggle between panning and text selection"));
-    connect(m_selectionToolAction, &QAction::toggled, m_viewer, &PdfViewerWidget::setTextSelectionEnabled);
+    connect(m_selectionToolAction, &QAction::toggled, this, &MainWindow::onSelectionToolToggled);
+
+#ifdef SKIA_AVAILABLE
+    m_gpuAction = new QAction(tr("&GPU Acceleration"), this);
+    m_gpuAction->setCheckable(true);
+    m_gpuAction->setStatusTip(tr("Render pages through Skia GPU (OpenGL) instead of the CPU painter"));
+    m_gpuAction->setChecked(m_gpuActive);
+    m_gpuAction->setVisible(true);
+    connect(m_gpuAction, &QAction::toggled, this, &MainWindow::toggleGpuAcceleration);
+#endif
 
     // Tools actions (new features)
     m_compressAction = new QAction(QIcon::fromTheme("document-compress"), tr("&Optimize PDF..."), this);
@@ -261,6 +285,11 @@ void MainWindow::createMenus() {
     viewMenu->addAction(m_zoomInAction);
     viewMenu->addAction(m_zoomOutAction);
     viewMenu->addSeparator();
+#ifdef SKIA_AVAILABLE
+    if (m_gpuAction)
+        viewMenu->addAction(m_gpuAction);
+#endif
+    viewMenu->addSeparator();
     viewMenu->addAction(m_searchAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_fullScreenAction);
@@ -331,11 +360,7 @@ void MainWindow::createToolBars() {
     m_viewModeCombo->addItem(tr("Continuous"));
     m_viewModeCombo->setToolTip(tr("Display mode"));
     connect(m_viewModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int index) {
-        m_viewer->setViewMode(index == 0
-            ? PdfViewerWidget::ViewMode::SinglePage
-            : PdfViewerWidget::ViewMode::Continuous);
-    });
+            this, &MainWindow::onViewModeChanged);
     viewToolBar->addWidget(m_viewModeCombo);
     
     // Tools toolbar (new features)
@@ -390,13 +415,9 @@ void MainWindow::createStatusBar() {
     statusBar()->addWidget(m_statusLabel, 1);
     
     // Permanent widgets
-    QLabel* rotationLabel = new QLabel("Rotation: 0°");
-    rotationLabel->setMinimumWidth(100);
-    statusBar()->addPermanentWidget(rotationLabel);
-    
-    connect(m_viewer, &PdfViewerWidget::rotationChanged, this, [rotationLabel](int rot) {
-        rotationLabel->setText(QString("Rotation: %1°").arg(rot));
-    });
+    m_rotationLabel = new QLabel("Rotation: 0°");
+    m_rotationLabel->setMinimumWidth(100);
+    statusBar()->addPermanentWidget(m_rotationLabel);
 }
 
 void MainWindow::createBookmarksPanel() {
@@ -483,8 +504,8 @@ void MainWindow::addOutlineChildren(IPdfOutline* first, QStandardItem* parentIte
 void MainWindow::onBookmarkClicked(const QModelIndex& index) {
     if (!m_viewer) return;
     int page = index.data(Qt::UserRole).toInt();
-    if (page >= 0 && page < m_viewer->pageCount()) {
-        m_viewer->setPage(page);
+    if (page >= 0 && page < activePageCount()) {
+        setActivePage(page);
     }
 }
 
@@ -500,7 +521,8 @@ void MainWindow::openFile() {
         m_statusLabel->setText(tr("Loading %1...").arg(QFileInfo(fileName).fileName()));
         QApplication::processEvents();
         
-        if (m_viewer->loadFile(fileName)) {
+        bool ok = m_viewer->loadFile(fileName);
+        if (ok) {
             m_statusLabel->setText(tr("Loaded: %1").arg(QFileInfo(fileName).fileName()));
         } else {
             m_statusLabel->setText(tr("Failed to load: %1").arg(QFileInfo(fileName).fileName()));
@@ -518,7 +540,7 @@ void MainWindow::saveAs() {
 }
 
 void MainWindow::printDocument() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
     QPrinter printer(QPrinter::HighResolution);
     QPrintDialog dialog(&printer, this);
@@ -541,7 +563,7 @@ void MainWindow::aboutPdfium() {
 void MainWindow::onPageChanged(int page) {
     updateNavigationActions();
     if (m_pageLabel) {
-        m_pageLabel->setText(QString("Page: %1 / %2").arg(page + 1).arg(m_viewer->pageCount()));
+        m_pageLabel->setText(QString("Page: %1 / %2").arg(page + 1).arg(activePageCount()));
     }
 }
 
@@ -552,13 +574,15 @@ void MainWindow::onZoomChanged(qreal zoom) {
 }
 
 void MainWindow::onRotationChanged(int rotation) {
-    // Handled by status bar connection
+    if (m_rotationLabel) {
+        m_rotationLabel->setText(QString("Rotation: %1°").arg(rotation));
+    }
 }
 
 void MainWindow::onPageCountChanged(int count) {
     updateNavigationActions();
     if (m_pageLabel) {
-        m_pageLabel->setText(QString("Page: %1 / %2").arg(m_viewer->currentPage() + 1).arg(count));
+        m_pageLabel->setText(QString("Page: %1 / %2").arg(activeCurrentPage() + 1).arg(count));
     }
 }
 
@@ -584,7 +608,7 @@ void MainWindow::toggleSearchBar(bool visible) {
 }
 
 void MainWindow::startSearch() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
     QString term = m_searchEdit->text();
     if (term.isEmpty()) {
@@ -605,7 +629,7 @@ void MainWindow::startSearch() {
     
     doc->findNextMatch();
     updateSearchAfterNavigation();
-    emit m_viewer->statusMessage(tr("Found %1 match(es) for \"%2\"").arg(total).arg(term));
+    emitStatus(tr("Found %1 match(es) for \"%2\"").arg(total).arg(term));
 }
 
 void MainWindow::searchNextMatch() {
@@ -634,16 +658,16 @@ void MainWindow::updateSearchAfterNavigation() {
     
     int total = doc->totalMatches();
     int currentPage = doc->currentMatchPage();
-    if (currentPage >= 0 && currentPage != m_viewer->currentPage()) {
-        m_viewer->setPage(currentPage);
+    if (currentPage >= 0 && currentPage != activeCurrentPage()) {
+        setActivePage(currentPage);
     }
     
     m_searchLabel->setText(tr("%1 / %2").arg(doc->currentMatchIndex() + 1).arg(total));
-    m_viewer->update();
+    m_viewer->widget()->update();
 }
 
 void MainWindow::updateActions() {
-    bool hasDoc = m_viewer && m_viewer->pageCount() > 0;
+    bool hasDoc = m_viewer && activePageCount() > 0;
     m_saveAsAction->setEnabled(hasDoc);
     m_saveOptimizedAction->setEnabled(hasDoc);
     m_printAction->setEnabled(hasDoc);
@@ -668,8 +692,8 @@ void MainWindow::updateActions() {
 void MainWindow::updateNavigationActions() {
     if (!m_viewer) return;
     
-    int current = m_viewer->currentPage();
-    int count = m_viewer->pageCount();
+    int current = activeCurrentPage();
+    int count = activePageCount();
     
     m_firstPageAction->setEnabled(count > 0 && current > 0);
     m_prevPageAction->setEnabled(count > 0 && current > 0);
@@ -677,10 +701,156 @@ void MainWindow::updateNavigationActions() {
     m_lastPageAction->setEnabled(count > 0 && current < count - 1);
 }
 
+// ============ Active-viewer dispatch ============
+
+int MainWindow::activePageCount() const {
+    // Single source of truth is the shared document, which both viewers poll.
+    // A hidden viewer's cached m_pageCount can lag behind a just-loaded doc;
+    // the document's count is always authoritative for enabling/denominators.
+    if (!m_viewer) return 0;
+    PdfDocument* doc = m_viewer->document();
+    return doc ? doc->pageCount() : 0;
+}
+
+int MainWindow::activeCurrentPage() const {
+    return m_viewer ? m_viewer->currentPage() : -1;
+}
+
+void MainWindow::emitStatus(const QString& message) {
+    if (m_statusLabel) m_statusLabel->setText(message);
+}
+
+void MainWindow::goToFirstPageSlot() {
+    m_viewer->goToFirstPage();
+}
+
+void MainWindow::goToPrevPageSlot() {
+    m_viewer->goToPrevPage();
+}
+
+void MainWindow::goToNextPageSlot() {
+    m_viewer->goToNextPage();
+}
+
+void MainWindow::goToLastPageSlot() {
+    m_viewer->goToLastPage();
+}
+
+void MainWindow::zoomInSlot() {
+    m_viewer->zoomIn();
+}
+
+void MainWindow::zoomOutSlot() {
+    m_viewer->zoomOut();
+}
+
+void MainWindow::zoomToFitSlot() {
+    m_viewer->zoomToFit();
+}
+
+void MainWindow::zoomToWidthSlot() {
+    m_viewer->zoomToWidth();
+}
+
+void MainWindow::rotateCwSlot() {
+    m_viewer->rotateClockwise();
+}
+
+void MainWindow::rotateCcwSlot() {
+    m_viewer->rotateCounterClockwise();
+}
+
+void MainWindow::setActivePage(int page) {
+    m_viewer->setPage(page);
+}
+
+void MainWindow::onViewModeChanged(int index) {
+    m_viewer->setViewMode(index == 0
+        ? AbstractPdfViewer::ViewMode::SinglePage
+        : AbstractPdfViewer::ViewMode::Continuous);
+}
+
+void MainWindow::onSelectionToolToggled(bool checked) {
+    m_viewer->setTextSelectionEnabled(checked);
+}
+
+void MainWindow::toggleGpuAcceleration(bool checked) {
+#ifndef SKIA_AVAILABLE
+    Q_UNUSED(checked);
+    return;
+#else
+    if (!m_viewer || checked == m_gpuActive) return;
+
+    // Capture the current view state from the viewer being replaced.
+    const int srcPage = m_viewer->currentPage();
+    const qreal srcZoom = m_viewer->zoom();
+    const int srcRot = m_viewer->rotation();
+    const int srcMode = static_cast<int>(m_viewer->viewMode());
+    const bool srcSelection = m_selectionToolAction ? m_selectionToolAction->isChecked() : false;
+    PdfDocument* doc = m_viewer->document();
+
+    // [PROBE] temp: log the new GPU surface geometry after the swap.
+    qDebug().noquote() << "[PROBE] toggleGpuAcceleration checked=" << checked
+                       << "srcPage=" << srcPage << "srcZoom=" << srcZoom;
+
+    // Tear down the old viewer and build the new backend.
+    QWidget* oldWidget = m_viewer->widget();
+    setCentralWidget(nullptr);
+
+    m_viewer = createViewer(checked);
+    AbstractPdfViewer* next = m_viewer;
+    next->setDocument(doc);
+
+    // Restore the view state on the fresh viewer.
+    next->setPage(srcPage);
+    next->setZoom(srcZoom);
+    next->setRotation(srcRot);
+    next->setViewMode(srcMode == 0
+        ? AbstractPdfViewer::ViewMode::SinglePage
+        : AbstractPdfViewer::ViewMode::Continuous);
+    next->setTextSelectionEnabled(srcSelection);
+
+    setupViewerConnections(next);
+    setCentralWidget(next->widget());
+    next->widget()->show();
+
+    if (oldWidget)
+        oldWidget->deleteLater();
+
+    m_gpuActive = checked;
+
+    if (m_viewModeCombo) {
+        if (m_viewModeCombo->currentIndex() != srcMode)
+            m_viewModeCombo->setCurrentIndex(srcMode);
+    }
+
+    emitStatus(tr("Renderer switched to %1").arg(
+        checked ? tr("GPU (Skia OpenGL)") : tr("CPU")));
+    updateActions();
+#endif
+}
+
 // ============ New Feature Slots ============
 
+void MainWindow::probeAutoToggle(const QString& path) {
+    if (!m_viewer) return;
+    m_viewer->loadFile(path);
+    QTimer::singleShot(1500, this, [this]() {
+#if !defined(SKIA_AVAILABLE)
+        qDebug().noquote() << "[PROBE] SKIA_AVAILABLE not defined - toggle is a no-op";
+#else
+        if (m_gpuAction)
+            m_gpuAction->setChecked(true);
+        // [PROBE] temp: repaint again after the relayout paint.
+        QTimer::singleShot(400, this, [this]() {
+            if (m_viewer) m_viewer->widget()->update();
+        });
+#endif
+    });
+}
+
 void MainWindow::saveOptimized() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
 
     QString fileName = QFileDialog::getSaveFileName(
         this,
@@ -782,9 +952,9 @@ void MainWindow::showCompressionDialog() {
 }
 
 void MainWindow::showElementInspector() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
-    int pageIndex = m_viewer->currentPage();
+    int pageIndex = activeCurrentPage();
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Element Inspector - Page %1").arg(pageIndex + 1));
     dialog.resize(600, 400);
@@ -808,9 +978,9 @@ void MainWindow::showElementInspector() {
 }
 
 void MainWindow::extractPageText() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
-    int pageIndex = m_viewer->currentPage();
+    int pageIndex = activeCurrentPage();
     
     // Get text from the document
     // This would use the new element extraction API
@@ -822,9 +992,9 @@ void MainWindow::extractPageText() {
 }
 
 void MainWindow::extractPageImages() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
-    int pageIndex = m_viewer->currentPage();
+    int pageIndex = activeCurrentPage();
     
     QString dir = QFileDialog::getExistingDirectory(this, tr("Select Output Directory"), QDir::homePath());
     if (dir.isEmpty()) return;
@@ -838,7 +1008,7 @@ void MainWindow::extractPageImages() {
 }
 
 void MainWindow::showDocumentStructure() {
-    if (!m_viewer || m_viewer->pageCount() == 0) return;
+    if (!m_viewer || activePageCount() == 0) return;
     
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Document Structure"));
@@ -867,7 +1037,7 @@ void MainWindow::showDocumentStructure() {
         "<p><b>Creator:</b> N/A</p>"
         "<p><b>Creation Date:</b> N/A</p>"
         "<p><b>Modification Date:</b> N/A</p>"
-    ).arg(m_viewer->pageCount()));
+    ).arg(activePageCount()));
     
     QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);

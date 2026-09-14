@@ -17,7 +17,9 @@
 #include <QModelIndex>
 
 struct IPdfOutline;
+class AbstractPdfViewer;
 class PdfViewerWidget;
+class SkiaPdfViewerWidget;
 class QProgressDialog;
 
 class MainWindow : public QMainWindow {
@@ -25,6 +27,9 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow();
+
+    // [PROBE] temp: auto-open + toggle GPU after a delay (diagnostics).
+    void probeAutoToggle(const QString& path);
     
 private slots:
     void openFile();
@@ -62,6 +67,25 @@ private slots:
     
     void updateActions();
     void updateNavigationActions();
+
+    // GPU acceleration (runtime CPU/GPU viewer toggle).
+    void toggleGpuAcceleration(bool checked);
+    void onViewModeChanged(int index);
+    void onSelectionToolToggled(bool checked);
+
+    // Active-viewer dispatch slots (the central widget is the single m_viewer;
+    // its concrete type depends on the GPU Acceleration toggle).
+    void goToFirstPageSlot();
+    void goToPrevPageSlot();
+    void goToNextPageSlot();
+    void goToLastPageSlot();
+    void zoomInSlot();
+    void zoomOutSlot();
+    void zoomToFitSlot();
+    void zoomToWidthSlot();
+    void rotateCwSlot();
+    void rotateCcwSlot();
+    void setActivePage(int page);
     
 private:
     void createActions();
@@ -76,8 +100,20 @@ private:
     // processed nodes that hard-caps the walk against malformed/circular
     // outlines.
     void addOutlineChildren(IPdfOutline* first, QStandardItem* parentItem, int depth, int& total);
-    
-    PdfViewerWidget* m_viewer = nullptr;
+
+    // Connects the unified viewer signal set (identical on every concrete
+    // backend) to MainWindow's slots. Called whenever the active viewer is
+    // (re)created, so switching renderers can reuse one wiring path.
+    void setupViewerConnections(AbstractPdfViewer* viewer);
+    AbstractPdfViewer* createViewer(bool gpu);
+
+    AbstractPdfViewer* m_viewer = nullptr;
+    QAction* m_gpuAction = nullptr;
+    bool m_gpuActive = false;
+
+    int activePageCount() const;
+    int activeCurrentPage() const;
+    void emitStatus(const QString& message);
     
     // Actions
     QAction* m_openAction = nullptr;
@@ -127,6 +163,7 @@ private:
     QLabel* m_pageLabel = nullptr;
     QLabel* m_zoomLabel = nullptr;
     QLabel* m_statusLabel = nullptr;
+    QLabel* m_rotationLabel = nullptr;
 
     // Compression progress dialog (owned via WA_DeleteOnClose)
     QProgressDialog* m_compressProgress = nullptr;

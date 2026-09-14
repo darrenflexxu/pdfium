@@ -9,23 +9,25 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <cstdlib>
 
 #include "include/gpu/ganesh/GrBackendSurface.h"
 #include "include/gpu/ganesh/gl/GrGLInterface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/core/SkCanvas.h"
+#include "include/core/SkColorSpace.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkPixmap.h"
 
-static constexpr int kW = 300;
-static constexpr int kH = 200;
-
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: skia_gl_harness <pdf_path>\n";
+        std::cerr << "usage: skia_gl_harness <pdf_path> [width height]\n";
         return 1;
     }
+    const int kW = argc > 2 ? std::atoi(argv[2]) : 300;
+    const int kH = argc > 3 ? std::atoi(argv[3]) : 200;
 
     QGuiApplication app(argc, argv);
 
@@ -133,6 +135,83 @@ int main(int argc, char** argv) {
     std::cout << "HARNESS " << (pass ? "PASS" : "FAIL")
               << "  mismatches=" << mismatches << "/" << total
               << "  (slack " << total / 500 << ")\n";
+
+    // Stage 2: mirror SkiaPdfViewerWidget::paintGL(), which wraps the widget's
+    // default FBO with GrBackendRenderTargets::MakeGL + WrapBackendRenderTarget
+    // (top-left origin, kRGBA_8888) and draws the cached PDFium page into it.
+    // Qt's offscreen platform default framebuffer has no usable color buffer for
+    // glReadPixels (GL_INVALID_OPERATION), so allocate a real RGBA8 FBO first.
+    {
+        QOpenGLFunctions* glf = QOpenGLContext::currentContext()->functions();
+        GLuint fbo = 0, rbo = 0;
+        glf->glGenFramebuffers(1, &fbo);
+        glf->glGenRenderbuffers(1, &rbo);
+        glf->glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+        glf->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, kW, kH);
+        glf->glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glf->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                       GL_RENDERBUFFER, rbo);
+        if (glf->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "HARNESS STAGE2 FATAL: FBO incomplete\n";
+            return 1;
+        }
+
+        GrGLFramebufferInfo fbInfo = {};
+        fbInfo.fFBOID = fbo;
+        fbInfo.fFormat = 0x8058;        // GL_RGBA8
+        GrBackendRenderTarget backend =
+            GrBackendRenderTargets::MakeGL(kW, kH, 0, 8, fbInfo);
+        sk_sp<SkSurface> wrapped = SkSurfaces::WrapBackendRenderTarget(
+            grCtx.get(), backend, kTopLeft_GrSurfaceOrigin,
+            kRGBA_8888_SkColorType, nullptr, nullptr);
+        if (!wrapped) {
+            std::cerr << "HARNESS STAGE2 FATAL: WrapBackendRenderTarget() returned nullptr\n";
+            return 1;
+        }
+        SkCanvas* wcanvas = wrapped->getCanvas();
+        wcanvas->clear(SK_ColorWHITE);
+        if (skImg) {
+            wcanvas->drawImageRect(
+                skImg.get(),
+                SkRect::MakeIWH(cpuImg.width(), cpuImg.height()),
+                SkRect::MakeIWH(kW, kH),
+                SkSamplingOptions(SkFilterMode::kLinear), nullptr,
+                SkCanvas::kFast_SrcRectConstraint);
+        }
+        grCtx->flushAndSubmit();
+
+        std::vector<uint8_t> wrapBuf(rowBytes * kH);
+        if (!wrapped->readPixels(readInfo, wrapBuf.data(), rowBytes, 0, 0)) {
+            std::cerr << "HARNESS STAGE2 FATAL: readPixels() failed\n";
+            return 1;
+        }
+
+        int wrapMismatch = 0;
+        for (int y = 0; y < kH; ++y) {
+            const uint8_t* cpuLine = cpuImg.constScanLine(y);
+            const uint8_t* gpuLine = &wrapBuf[y * rowBytes];
+            for (int x = 0; x < kW; ++x) {
+                const bool ok =
+                    std::abs(int(cpuLine[2]) - int(gpuLine[0])) <= 4 &&
+                    std::abs(int(cpuLine[1]) - int(gpuLine[1])) <= 4 &&
+                    std::abs(int(cpuLine[0]) - int(gpuLine[2])) <= 4 &&
+                    std::abs(int(cpuLine[3]) - int(gpuLine[3])) <= 4;
+                if (!ok) ++wrapMismatch;
+                cpuLine += 4;
+                gpuLine += 4;
+            }
+        }
+        const bool wrapPass = wrapMismatch <= total / 500;
+        std::cout << "HARNESS STAGE2 " << (wrapPass ? "PASS" : "FAIL")
+                  << "  mismatches=" << wrapMismatch << "/" << total
+                  << "  (slack " << total / 500 << ")\n";
+
+        glf->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glf->glDeleteFramebuffers(1, &fbo);
+        glf->glDeleteRenderbuffers(1, &rbo);
+        if (!wrapPass) return 1;
+    }
+
     glCtx.doneCurrent();
     return pass ? 0 : 1;
 }
