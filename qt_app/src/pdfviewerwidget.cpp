@@ -382,7 +382,8 @@ void PdfViewerWidget::drawSelectionForCurrentPage(QPainter& painter) {
         }
     }
     // Box fallback overlay (pages with no selectable text at all).
-    if (m_selecting && !m_boxSelStart.isNull() && !m_boxSelEnd.isNull()) {
+    if (cm.isEmpty() && m_selecting && !m_boxSelStart.isNull() &&
+        !m_boxSelEnd.isNull()) {
         QRect selRect = QRect(m_boxSelStart, m_boxSelEnd).normalized();
         painter.fillRect(selRect, QColor(0, 120, 215, 100));
         painter.setPen(QPen(QColor(0, 120, 215), 1, Qt::DashLine));

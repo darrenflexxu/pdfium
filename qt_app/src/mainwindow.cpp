@@ -29,6 +29,7 @@
 #include <QFontDatabase>
 #include <QDebug>
 #include <QTimer> // [PROBE] temp
+#include <QMouseEvent> // [PROBE] temp
 
 #include "pdfium_wrapper.h"
 
@@ -841,9 +842,32 @@ void MainWindow::probeAutoToggle(const QString& path) {
 #else
         if (m_gpuAction)
             m_gpuAction->setChecked(true);
-        // [PROBE] temp: repaint again after the relayout paint.
-        QTimer::singleShot(400, this, [this]() {
-            if (m_viewer) m_viewer->widget()->update();
+        // [PROBE] temp: enable selection tool then click the page center.
+        QTimer::singleShot(800, this, [this]() {
+            if (m_selectionToolAction)
+                m_selectionToolAction->setChecked(true);
+            QTimer::singleShot(300, this, [this]() {
+                if (m_viewer) {
+                    QWidget* w = m_viewer->widget();
+                    const QRectF pr = m_viewer->pageRect();
+                    const QPoint pos = pr.isValid() && !pr.isEmpty()
+                                          ? pr.center().toPoint()
+                                          : w->rect().center();
+                    qDebug().noquote() << "[PROBE] click at" << pos << "pageRect=" << pr;
+                    for (int i = 0; i < 3; ++i) {
+                        QMouseEvent press(QEvent::MouseButtonPress, QPointF(pos),
+                                          Qt::LeftButton, Qt::LeftButton,
+                                          Qt::NoModifier);
+                        QApplication::sendEvent(w, &press);
+                        QMouseEvent release(QEvent::MouseButtonRelease,
+                                            QPointF(pos), Qt::LeftButton,
+                                            Qt::NoButton, Qt::NoModifier);
+                        QApplication::sendEvent(w, &release);
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                        qDebug().noquote() << "[PROBE] click" << i << "ok";
+                    }
+                }
+            });
         });
 #endif
     });

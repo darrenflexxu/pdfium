@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QSet>
 #include <QColor>
+#include <QMouseEvent>
 
 namespace {
 
@@ -81,6 +82,10 @@ void report(const QString& tag, const QImage& fb) {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QString pdfPath = argc > 1 ? QString::fromUtf8(argv[1]) : "/tmp/skia_test.pdf";
+    const bool onlySelection = argc > 2 && QString::fromUtf8(argv[2]) == "sel" ||
+                                (argc > 2 && QString::fromUtf8(argv[2]) == "d");
+
+    if (onlySelection) goto selScenario;
 
     // ------------------------------------------------------------------
     // Scenario A: "open first, then toggle" (mirrors the real app: CPU viewer
@@ -119,11 +124,41 @@ int main(int argc, char** argv) {
         gpu->setRotation(srcRot);
         gpu->setViewMode(srcMode == 0 ? AbstractPdfViewer::ViewMode::SinglePage
                                       : AbstractPdfViewer::ViewMode::Continuous);
-        gpu->setTextSelectionEnabled(false);
+        gpu->setTextSelectionEnabled(true);
         win.setCentralWidget(gpu);
         gpu->show();
         gpu->raise();
         pumpFor(5000);
+
+        // [PROBE] D2: click on page text in GPU selection mode (shared doc).
+        {
+            QRectF pr2 = gpu->pageRect();
+            QPoint click2 = pr2.center().toPoint();
+            qDebug().noquote() << "[PROBE] A-D2: click at" << click2
+                               << "pageRect=" << pr2.toRect();
+            QMouseEvent press2(QEvent::MouseButtonPress, QPointF(click2),
+                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent rel2(QEvent::MouseButtonRelease, QPointF(click2),
+                             Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &press2);
+            QApplication::sendEvent(gpu, &rel2);
+            pumpFor(400);
+            qDebug().noquote() << "[PROBE] A-D2: click done, alive";
+
+            // Double-click (word select) + contiguous view.
+            QMouseEvent dbl(QEvent::MouseButtonDblClick, QPointF(click2),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &dbl);
+            QApplication::sendEvent(gpu, &rel2);
+            pumpFor(300);
+            qDebug().noquote() << "[PROBE] A-D2: dblclick done, alive";
+            gpu->setViewMode(AbstractPdfViewer::ViewMode::Continuous);
+            pumpFor(300);
+            QApplication::sendEvent(gpu, &press2);
+            QApplication::sendEvent(gpu, &rel2);
+            pumpFor(300);
+            qDebug().noquote() << "[PROBE] A-D2: continuous click done, alive";
+        }
 
         QImage gpuGrab = gpu->grabFramebuffer();
         gpuGrab.save("/tmp/real_gpu.png");
@@ -145,31 +180,117 @@ int main(int argc, char** argv) {
 
     pumpFor(300);
 
+    selScenario:
     // ------------------------------------------------------------------
-    // Scenario B: "toggle first, then open" (a fresh GPU-only window, doc is
-    // loaded through the shared PdfDocument -> loadFinished syncing).
+    // Scenario D: GPU + text selection -> click on page text.
+    // Window is intentionally leaked (never destroyed) so any crash here is
+    // from the click path itself, not teardown.
     // ------------------------------------------------------------------
     {
-        QMainWindow win;
-        win.resize(1024, 768);
-        win.show();
+        // In sel-mode the window is leaked to isolate teardown from click
+        // crashes; in normal flow it lives on the stack.
+        QMainWindow winObj;
+        QMainWindow* win = onlySelection ? new QMainWindow : &winObj;
+        win->resize(1024, 768);
+        win->show();
 
-        PdfDocument* doc = new PdfDocument(&win);
-        SkiaPdfViewerWidget* gpu = new SkiaPdfViewerWidget(&win);
+        PdfDocument* doc = new PdfDocument(win);
+        SkiaPdfViewerWidget* gpu = new SkiaPdfViewerWidget(win);
         gpu->setDocument(doc);
-        win.setCentralWidget(gpu);
+        win->setCentralWidget(gpu);
         gpu->show();
         gpu->raise();
         pumpFor(400);
 
-        qDebug().noquote() << "[PROBE] B: load via PdfDocument::load";
         bool ok = doc->load(pdfPath, QString());
-        qDebug().noquote() << "[PROBE] B: load ok=" << ok
-                           << "gpu page/zoom=" << gpu->currentPage() << gpu->zoom();
-        pumpFor(2500);
+        qDebug().noquote() << "[PROBE] D: load ok=" << ok;
+        // Click immediately while async renders are in flight.
+        pumpFor(20);
+
+        gpu->setTextSelectionEnabled(true);
+        qDebug().noquote() << "[PROBE] D: selection on, pageRect="
+                           << gpu->pageRect().toRect();
+
+        // Click on a known text position WITHOUT pre-building charMap so the
+        // first click triggers the lazy charMap build on the GUI thread while
+        // background renders may still be in flight (a race the user hit).
+        {
+            const QRectF pr = gpu->pageRect();
+            const QPointF dev = doc->pageToDevice(0, QPointF(80, 744),
+                                                  QPoint(0, 0),
+                                                  pr.size().toSize(), 0);
+            qDebug().noquote() << "[PROBE] D: first click pos (lazy build)="
+                               << pr.topLeft() + dev;
+        }
+
+        const QPoint base = [&]() {
+            const QRectF pr = gpu->pageRect();
+            const QPointF dev = doc->pageToDevice(0, QPointF(80, 744),
+                                                  QPoint(0, 0),
+                                                  pr.size().toSize(), 0);
+            return (pr.topLeft() + dev).toPoint();
+        }();
+        const QPoint grid[] = { base,
+                                base + QPoint(4, -4),
+                                base + QPoint(-6, 6),
+                                base + QPoint(40, 10),
+                                gpu->pageRect().center().toPoint(),
+                                base + QPoint(-120, -40) };
+        for (int i = 0; i < 6; ++i) {
+            qDebug().noquote() << "[PROBE] D: click" << i << "at" << grid[i];
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(grid[i]),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease, QPointF(grid[i]),
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &press);
+            QApplication::sendEvent(gpu, &release);
+            pumpFor(40);
+        }
+
+        // Double-click (word selection path: wordRange).
+        qDebug().noquote() << "[PROBE] D: dblclick at" << base;
+        {
+            QMouseEvent p1(QEvent::MouseButtonPress, QPointF(base),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent r1(QEvent::MouseButtonRelease, QPointF(base),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &p1);
+            QApplication::sendEvent(gpu, &r1);
+            QMouseEvent p2(QEvent::MouseButtonDblClick, QPointF(base),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent r2(QEvent::MouseButtonRelease, QPointF(base),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &p2);
+            QApplication::sendEvent(gpu, &r2);
+            pumpFor(150);
+        }
+
+        // Drag-select: press at base, move across several lines, release.
+        qDebug().noquote() << "[PROBE] D: drag from" << base << "by"
+                           << QPoint(0, 300);
+        {
+            QMouseEvent p(QEvent::MouseButtonPress, QPointF(base),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &p);
+            const QPoint end = base + QPoint(0, 300);
+            for (int step = 1; step <= 5; ++step) {
+                QPointF pos = QPointF(base) + (QPointF(end) - QPointF(base)) *
+                                              (step / 5.0);
+                QMouseEvent m(QEvent::MouseMove, pos, Qt::LeftButton,
+                              Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(gpu, &m);
+                pumpFor(15);
+            }
+            QMouseEvent r(QEvent::MouseButtonRelease, QPointF(end),
+                          Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(gpu, &r);
+            pumpFor(150);
+        }
+        pumpFor(500);
 
         QImage fb = gpu->grabFramebuffer();
-        report("B framebuffer", fb);
+        report("D framebuffer after click", fb);
+        qDebug().noquote() << "[PROBE] D-END (clicked, alive)";
     }
 
     qDebug().noquote() << "[PROBE] done";

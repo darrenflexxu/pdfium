@@ -6,6 +6,8 @@
 #include <QKeyEvent>
 #include <QResizeEvent>
 #include <QPaintEvent>
+#include <QPolygonF>
+#include <QTransform>
 #include <QApplication>
 #include <QClipboard>
 #include <QDebug>
@@ -111,9 +113,10 @@ SkiaPdfViewerWidget::SkiaPdfViewerWidget(QWidget* parent)
 
 SkiaPdfViewerWidget::~SkiaPdfViewerWidget() {
     waitForPendingRenders();
-    if (m_document) {
-        disconnect(m_document, nullptr, this, nullptr);
-    }
+    // NOTE: do NOT disconnect(m_document, ...) here.  The document may
+    // have already been destroyed (e.g. sibling child of a parent that
+    // destroys in creation order).  Qt auto-disconnects all signal
+    // connections from/to `this' in ~QObject, which runs after our body.
 }
 
 void SkiaPdfViewerWidget::setDocument(PdfDocument* document) {
@@ -438,6 +441,34 @@ QPointF SkiaPdfViewerWidget::mapToPage(const QPoint& widgetPos) const {
 
 QPointF SkiaPdfViewerWidget::mapFromPageF(const QPointF& pagePos) const {
     return mapFromPageOnPage(pagePos, m_currentPage);
+}
+
+// Build the affine map page-space -> widget-space for one page.  Computing it
+// once per page per frame is cheap; applying it per char rect below avoids
+// calling pageToDevice() (which loads the page via FPDF_LoadPage each time)
+// once per character in the selection/search draw hot paths.
+bool SkiaPdfViewerWidget::pageToWidgetTransform(int pageIndex,
+                                                QTransform& out) const {
+    QRectF pRect = pageRectOf(pageIndex);
+    if (pRect.isEmpty() || !m_document || pageIndex < 0 || pageIndex >= m_pageCount)
+        return false;
+
+    const QSizeF pageSize = m_document->pageSize(pageIndex);
+    if (pageSize.isEmpty())
+        return false;
+
+    QPolygonF src, dst;
+    src << QPointF(0, 0) << QPointF(pageSize.width(), 0)
+        << QPointF(pageSize.width(), pageSize.height())
+        << QPointF(0, pageSize.height());
+    dst << mapFromPageOnPage(QPointF(0, 0), pageIndex)
+        << mapFromPageOnPage(QPointF(pageSize.width(), 0), pageIndex)
+        << mapFromPageOnPage(QPointF(pageSize.width(), pageSize.height()),
+                             pageIndex)
+        << mapFromPageOnPage(QPointF(0, pageSize.height()), pageIndex);
+    if (!QTransform::quadToQuad(src, dst, out))
+        return false;
+    return true;
 }
 
 QPointF SkiaPdfViewerWidget::mapFromPageOnPage(const QPointF& pagePos,
@@ -951,7 +982,11 @@ void SkiaPdfViewerWidget::paintGL() {
                                      bg.red(), bg.green(), bg.blue()));
 
     canvas->save();
-    canvas->scale(dpr, dpr);
+    // macOS presents the native default framebuffer vertically flipped, so the
+    // logical widget space (y down, y=0 at top) must be mirrored into the
+    // surface: top of the widget -> bottom of the surface -> top on screen.
+    canvas->translate(0, h);
+    canvas->scale(dpr, -dpr);
     drawViewContent(canvas);
     canvas->restore();
 
@@ -966,6 +1001,7 @@ void SkiaPdfViewerWidget::paintGL() {
         QOpenGLFunctions* fb = context()->functions();
         if (fb) {
             fb->glFinish();
+#if !defined(NDEBUG) || defined(_DEBUG) || defined(DEBUG)
             if (m_probeFrame <= 8) {
                 QImage dump(w, h, QImage::Format_RGBA8888);
                 fb->glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, dump.bits());
@@ -973,6 +1009,7 @@ void SkiaPdfViewerWidget::paintGL() {
                 dump.mirrored(false, true).save(path);
                 qDebug().noquote() << "[PROBE] saved" << path;
             }
+#endif
             GLint vp[4] = {0, 0, 0, 0};
             fb->glGetIntegerv(GL_VIEWPORT, vp);
             GLint atType = 0, atName = 0;
@@ -1118,11 +1155,14 @@ void SkiaPdfViewerWidget::drawSearchHighlights(SkCanvas* canvas, int pageIndex,
     if (!m_document || !m_document->isLoaded())
         return;
 
+    QTransform tx;
+    if (!pageToWidgetTransform(pageIndex, tx)) return;
+
     SkPaint fill;
     fill.setColor(SkColorSetARGB(90, 255, 255, 0));
     const QList<QRectF> matches = m_document->matchesForPage(pageIndex);
     for (const QRectF& match : matches) {
-        const QRectF mapped = mapRectFromPageOnPage(match, pageIndex);
+        const QRectF mapped = tx.mapRect(match);
         if (mapped.isEmpty()) continue;
         canvas->drawRect(toSkRect(mapped), fill);
     }
@@ -1130,7 +1170,7 @@ void SkiaPdfViewerWidget::drawSearchHighlights(SkCanvas* canvas, int pageIndex,
     if (m_document->currentMatchPage() == pageIndex) {
         const QRectF currentMatch = m_document->currentMatchRect();
         if (!currentMatch.isNull()) {
-            const QRectF mapped = mapRectFromPageOnPage(currentMatch, pageIndex);
+            const QRectF mapped = tx.mapRect(currentMatch);
             if (!mapped.isEmpty()) {
                 const SkRect r = toSkRect(mapped);
                 SkPaint cfill;
@@ -1153,16 +1193,18 @@ void SkiaPdfViewerWidget::drawSelection(SkCanvas* canvas, int pageIndex) {
     const QVector<CharInfo>& cm = m_document->charMap(pageIndex);
     const int a = qMin(m_selectionStart, m_selectionEnd);
     const int b = qMax(m_selectionStart, m_selectionEnd);
+    QTransform tx;
+    const bool haveTx = pageToWidgetTransform(pageIndex, tx);
     SkPaint hl;
     hl.setColor(SkColorSetARGB(90, 0, 120, 215));
-    if (a >= 0 && b > a && a < cm.size()) {
+    if (a >= 0 && b > a && a < cm.size() && haveTx) {
         const int hi = qMin(b, (int)cm.size());
         QRectF lineRect;
         for (int i = a; i < hi; ++i) {
             QRectF charRect = cm[i].bounds;
             if (i == a || qAbs(charRect.top() - lineRect.top()) > 2.0) {
                 if (!lineRect.isEmpty()) {
-                    const QRectF mapped = mapRectFromPageOnPage(lineRect, pageIndex);
+                    const QRectF mapped = tx.mapRect(lineRect);
                     if (!mapped.isEmpty()) canvas->drawRect(toSkRect(mapped), hl);
                 }
                 lineRect = charRect;
@@ -1171,13 +1213,17 @@ void SkiaPdfViewerWidget::drawSelection(SkCanvas* canvas, int pageIndex) {
             }
         }
         if (!lineRect.isEmpty()) {
-            const QRectF mapped = mapRectFromPageOnPage(lineRect, pageIndex);
+            const QRectF mapped = tx.mapRect(lineRect);
             if (!mapped.isEmpty()) canvas->drawRect(toSkRect(mapped), hl);
         }
     }
 
-    // Box fallback overlay (pages with no selectable text at all).
-    if (m_selecting && !m_boxSelStart.isNull() && !m_boxSelEnd.isNull()) {
+    // Box fallback overlay, only on pages with no selectable text at all.
+    // NOTE: it must NOT draw a dashed/path-effect stroke: on GL the skia
+    // stroke tessellator shader fails to compile on some drivers and default
+    // cerr handler aborts the process.
+    if (cm.isEmpty() && m_selecting && !m_boxSelStart.isNull() &&
+        !m_boxSelEnd.isNull()) {
         const QRect selRect = QRect(m_boxSelStart, m_boxSelEnd).normalized();
         const SkRect r = toSkRect(QRectF(selRect));
         SkPaint bfill;
@@ -1187,15 +1233,12 @@ void SkiaPdfViewerWidget::drawSelection(SkCanvas* canvas, int pageIndex) {
         bstroke.setStyle(SkPaint::kStroke_Style);
         bstroke.setStrokeWidth(1);
         bstroke.setColor(0xFF0078D7);
-        const SkScalar dashes[] = { 4.0f, 2.0f };
-        bstroke.setPathEffect(
-            SkDashPathEffect::Make(SkSpan<const SkScalar>(dashes, 2), 0.0f));
         canvas->drawRect(r, bstroke);
     }
 
     // Caret: a 1px vertical line at the left edge of the char that follows the
     // caret index (right edge of the last char when at the end).
-    if (m_cursorIndex >= 0 && !cm.isEmpty()) {
+    if (m_cursorIndex >= 0 && !cm.isEmpty() && haveTx) {
         QRectF cb;
         if (m_cursorIndex < cm.size()) {
             cb = cm[m_cursorIndex].bounds;
@@ -1203,8 +1246,8 @@ void SkiaPdfViewerWidget::drawSelection(SkCanvas* canvas, int pageIndex) {
             cb = cm.last().bounds;
             cb.setLeft(cb.right());
         }
-        const QPointF p1 = mapFromPageF(QPointF(cb.left(), cb.top()));
-        const QPointF p2 = mapFromPageF(QPointF(cb.left(), cb.bottom()));
+        const QPointF p1 = tx.map(QPointF(cb.left(), cb.top()));
+        const QPointF p2 = tx.map(QPointF(cb.left(), cb.bottom()));
         SkPaint caret;
         caret.setColor(0xFFFF5050);
         caret.setStrokeWidth(1);
@@ -1229,6 +1272,7 @@ void SkiaPdfViewerWidget::onRenderFinished(int pageIndex, QImage image,
 }
 
 void SkiaPdfViewerWidget::probeDumpCanvas(SkCanvas* canvas) {
+#if !defined(NDEBUG) || defined(_DEBUG) || defined(DEBUG)
     if (m_probeFrame > 8 || !canvas) return;
     auto surface = canvas->getSurface();
     if (!surface) {
@@ -1251,6 +1295,7 @@ void SkiaPdfViewerWidget::probeDumpCanvas(SkCanvas* canvas) {
     qDebug().noquote() << "[PROBE] drawview saved" << path
                        << "size=" << dump.size()
                        << "cache=" << m_renderedPages.keys();
+#endif
 }
 
 #endif // SKIA_AVAILABLE

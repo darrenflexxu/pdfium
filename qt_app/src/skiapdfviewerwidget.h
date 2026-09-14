@@ -20,6 +20,7 @@
 #include <QMap>
 #include <QSet>
 #include <QSize>
+#include <QTransform>
 #include <QFuture>
 #include <memory>
 
@@ -128,6 +129,7 @@ private:
     void updateCurrentPageForViewport();
     void setScrollToPage(int pageIndex);
     QPointF mapFromPageF(const QPointF& pagePos) const;
+    bool pageToWidgetTransform(int pageIndex, QTransform& out) const;
     QPointF mapFromPageOnPage(const QPointF& pagePos, int pageIndex) const;
     QPointF mapToPageOnPage(const QPoint& widgetPos, int pageIndex) const;
     QRectF mapRectFromPageOnPage(const QRectF& pageRect, int pageIndex) const;
