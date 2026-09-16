@@ -1,63 +1,42 @@
-## 9. 新增需求：统一 PDF 视图接口 (Unified Viewer Interface)
+## 10. 新增需求：PDFium 内部启用 Skia 渲染 (Enable Internal PDFium Skia Rendering)
 
 ### 需求背景
-目前 `MainWindow` 同时持有 `PdfViewerWidget` (CPU) 和 `SkiaPdfViewerWidget` (GPU) 两个实例，并在切换 GPU 加速时通过 `if (m_gpuActive)` 分支手动分发所有指令。这种做法导致 `MainWindow` 中存在大量冗余的逻辑分支，且难以维护。为了提高代码可维护性和可扩展性，需要提取一套统一的视图接口，使 `MainWindow` 能够通过多态机制操作当前的视图组件。
+目前 `SkiaPdfViewerWidget` 实现的是“GPU 加速显示”，即：PDFium (CPU 渲染) $\rightarrow$ `QImage` $\rightarrow$ Skia (GPU 绘制)。这仅仅是利用 GPU 提高了图像的绘制和缩放速度，但 PDF 的实际栅格化（Rasterization）依然由 PDFium 的 CPU 渲染器完成。
+
+真正的“PDFium 使用 Skia 渲染”是指在编译 PDFium 时启用 `pdf_use_skia = true` 选项。启用后，PDFium 内部将使用 Skia 的绘制指令来替代其原有的 `FPDF_Canvas` 实现。这能带来更高的渲染质量（更好的抗锯齿、更精准的路径绘制）以及潜在的内部性能提升。
 
 ### 涉及修改的文件列表
-- `qt_app/src/abstractpdfviewer.h` (新): 定义 `AbstractPdfViewer` 抽象基类。
-- `qt_app/src/pdfviewerwidget.h`: 修改继承关系为 `AbstractPdfViewer`。
-- `qt_app/src/pdfviewerwidget.cpp`: 适配基类接口。
-- `qt_app/src/skiapdfviewerwidget.h`: 修改继承关系为 `AbstractPdfViewer`。
-- `qt_app/src/skiapdfviewerwidget.cpp`: 适配基类接口。
-- `qt_app/src/mainwindow.h`: 将 `m_viewer` 和 `m_gpuViewer` 合并为单个 `AbstractPdfViewer* m_viewer`。
-- `qt_app/src/mainwindow.cpp`: 重构视图初始化、信号连接及指令分发逻辑。
+- `build_scripts/build_pdfium.py`: 增加对 `pdf_use_skia` GN 参数的支持。
 
 ### 具体执行步骤
 
-#### 步骤 1: 定义抽象基类 `AbstractPdfViewer`
+#### 步骤 1: 扩展 `build_pdfium.py` 的配置选项
 - **实现内容**:
-    1. 创建 `abstractpdfviewer.h`，定义一个继承自 `QWidget` 的抽象类。
-    2. **提取公共 API**: 将所有两个 viewer 共有的公开方法定义为纯虚函数 (`= 0`)，包括：
-        - 文档管理：`setDocument()`, `document()`
-        - 页面导航：`setPage()`, `currentPage()`, `pageCount()`, `goToNextPage()`, `goToPrevPage()`, `goToFirstPage()`, `goToLastPage()`
-        - 视图控制：`setZoom()`, `zoom()`, `zoomIn()`, `zoomOut()`, `zoomToFit()`, `zoomToWidth()`, `setRotation()`, `rotation()`, `rotateClockwise()`, `rotateCounterClockwise()`
-        - 视图模式：定义 `enum class ViewMode { SinglePage, Continuous }`，并定义 `setViewMode()`, `viewMode()`
-        - 文本选择：`setTextSelectionEnabled()`, `isTextSelectionEnabled()`
-        - 坐标映射：`mapToPage()`, `pageRect()`, `pageRect(int)`
-    3. **统一信号**: 将所有公共信号（如 `pageChanged`, `zoomChanged`, `statusMessage` 等）定义在基类中。
-- **校验方式**: 编译通过，确保基类定义了所有必要的接口且不包含具体实现。
+    1. 在 `BuildConfig` 类中新增 `use_skia: bool = False` 参数。
+    2. 修改 `BuildConfig.gn_args` 属性，将硬编码的 `'pdf_use_skia = false'` 修改为动态赋值：`f'pdf_use_skia = {str(self.use_skia).lower()}'`。
+    3. 在 `main()` 函数的 `argparse` 配置中，新增 `--use-skia` 命令行参数（action="store_true"）。
+    4. 将该参数传递给 `BuildConfig` 实例。
+- **校验方式**: 运行 `python build_scripts/build_pdfium.py --help`，验证 `--use-skia` 参数已存在。
 
-#### 步骤 2: 实现接口继承与适配
+#### 步骤 2: 执行 Skia 增强版 PDFium 构建
 - **实现内容**:
-    1. 修改 `PdfViewerWidget` 和 `SkiaPdfViewerWidget` 的头文件，使其继承自 `AbstractPdfViewer`。
-    2. 在 `.cpp` 文件中，确保所有纯虚函数得到了正确实现（大部分只需保留现有实现，但需检查函数签名是否与基类完全一致）。
-    3. 移除子类中重复定义的 `ViewMode` 枚举，统一使用基类的枚举。
-- **校验方式**: 编译通过，验证两个子类都能正确实例化并调用基类接口。
+    1. 使用 `--use-skia` 标志重新构建 PDFium：
+       `python build_scripts/build_pdfium.py --target-os mac --target-cpu arm64 --use-skia`
+    2. 确保构建流程（GN $\rightarrow$ Ninja $\rightarrow$ Artifact Extraction）全部成功。
+- **校验方式**: 验证 `third_party/pdfium/lib/libpdfium.a` 已更新且文件大小有明显变化（启用 Skia 后库体积通常会增加）。
 
-#### 步骤 3: 重构 `MainWindow` 视图管理
+#### 步骤 3: 渲染质量对比验证
 - **实现内容**:
-    1. **成员变量修改**: 删除 `m_gpuViewer`，将 `m_viewer` 的类型改为 `AbstractPdfViewer*`。
-    2. **初始化逻辑**:
-        - 根据 `m_gpuActive` 初始状态，仅实例化一个对应的 Viewer。
-        - 实现一个私有方法 `setupViewerConnections(AbstractPdfViewer* viewer)`，用于统一连接视图信号到 `MainWindow` 的槽函数。
-    3. **指令分发简化**: 遍历 `MainWindow` 中所有 `goTo...`, `zoom...`, `rotate...` 等 Slot，删除 `if (m_gpuActive)` 分支，直接调用 `m_viewer->method()`。
-    4. **重构 `toggleGpuAcceleration`**:
-        - 记录当前视图的状态（Page, Zoom, Rotation, Mode）。
-        - 销毁旧视图 $\rightarrow$ 根据 `checked` 状态创建新的 `PdfViewerWidget` 或 `SkiaPdfViewerWidget`。
-        - 调用 `setupViewerConnections` 重新绑定信号。
-        - 恢复之前记录的状态到新视图。
-        - 调用 `setCentralWidget(m_viewer)`。
-- **校验方式**: 
-    1. **功能验证**: 验证打开文件、翻页、缩放等基础功能在两种模式下均正常工作。
-    2. **切换验证**: 切换 GPU 加速 $\rightarrow$ 验证当前页面、缩放级别、旋转角度和视图模式被正确保留且无视觉跳变。
-    3. **信号验证**: 验证翻页后状态栏的页码更新、缩放后比例更新等信号链路依然畅通。
+    1. 启动 `pdf_reader` 应用，加载包含复杂矢量路径或透明度效果的 PDF 文档。
+    2. 对比开启 `pdf_use_skia` 前后的渲染结果（尤其是边缘平滑度和文本细节）。
+    3. 验证在 `SkiaPdfViewerWidget` (GPU 模式) 下，渲染结果依然正确且流畅。
+- **校验方式**: 视觉验证 $\rightarrow$ 确认复杂页面无渲染异常，且在视觉上更趋向于 Chrome 的渲染效果（因为 Chrome 正是使用 PDFium + Skia）。
 
 ### 综合校验方案
 
 | 测试场景 | 操作步骤 | 预期结果 |
 | :--- | :--- | :--- |
-| **基础导航** | 点击“下一页”/“上一页” | 无论处于 CPU 还是 GPU 模式，页面均正确跳转 |
-| **视图控制** | 调整缩放级别 $\rightarrow$ 旋转页面 | 视图正确响应，状态栏显示更新 |
-| **无缝切换** | 缩放到 150% $\rightarrow$ 翻到第 5 页 $\rightarrow$ 切换 GPU 加速 | 切换后仍处于第 5 页，缩放保持 150%，无明显闪烁 |
-| **信号一致性** | 更改视图模式为 Continuous | 无论哪个 Viewer，`MainWindow` 都能收到通知并更新 UI |
-| **内存检查** | 频繁切换 GPU 加速 $\rightarrow$ 观察内存 | 切换时旧 Viewer 被正确销毁，无内存泄漏 |
+| **构建验证** | 运行 `build_pdfium.py --use-skia` | Ninja 成功完成构建，生成新的 `libpdfium.a` |
+| **启动验证** | 启动应用 $\rightarrow$ 加载 PDF | 应用能正常启动，文档加载速度与之前相当 |
+| **质量对比** | 观察精细线条或渐变区域 | 渲染边缘更加平滑，抗锯齿效果提升 |
+| **功能回归** | 执行翻页、缩放、文本选择 | 所有基础功能均未受影响 |

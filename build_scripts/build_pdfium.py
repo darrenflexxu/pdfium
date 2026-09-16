@@ -45,7 +45,8 @@ class BuildConfig:
                  is_component_build: bool = False,
                  enable_xfa: bool = True,
                  enable_v8: bool = False,
-                 use_sysroot: bool = False):
+                 use_sysroot: bool = False,
+                 use_skia: bool = False):
         self.target_os = target_os
         self.target_cpu = target_cpu
         self.is_debug = is_debug
@@ -53,6 +54,7 @@ class BuildConfig:
         self.enable_xfa = enable_xfa
         self.enable_v8 = enable_v8
         self.use_sysroot = use_sysroot
+        self.use_skia = use_skia
         
     @property
     def build_dir_name(self) -> str:
@@ -71,7 +73,7 @@ class BuildConfig:
             f'is_component_build = {str(self.is_component_build).lower()}',
             f'pdf_enable_xfa = {str(effective_xfa).lower()}',
             f'pdf_enable_v8 = {str(self.enable_v8).lower()}',
-            'pdf_use_skia = false',
+            f'pdf_use_skia = {str(self.use_skia).lower()}',
             'pdf_use_skia_paths = false',
             'use_sysroot = false',
             'use_custom_libcxx = false',
@@ -441,6 +443,7 @@ def main():
     parser.add_argument("--component", action="store_true", help="Build as component (shared library)")
     parser.add_argument("--no-xfa", action="store_true", help="Disable XFA support")
     parser.add_argument("--enable-v8", action="store_true", help="Enable V8 JavaScript engine")
+    parser.add_argument("--use-skia", action="store_true", help="Enable internal PDFium Skia rendering")
     parser.add_argument("--list-configs", action="store_true", help="List supported configurations")
     parser.add_argument("--all", action="store_true", help="Build all native configurations")
     
@@ -475,6 +478,7 @@ def main():
             is_component_build=args.component,
             enable_xfa=not args.no_xfa,
             enable_v8=args.enable_v8,
+            use_skia=args.use_skia,
         )]
     else:
         # Default: native release build

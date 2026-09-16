@@ -46,6 +46,7 @@ elseif(APPLE)
     target_link_libraries(pdfium_wrapper PRIVATE
         "-framework CoreFoundation"
         "-framework CoreGraphics"
+        "-framework CoreText"
         "-framework Security"
         "-framework Foundation"
     )
