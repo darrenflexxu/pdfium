@@ -67,6 +67,10 @@ public:
     virtual void setViewMode(ViewMode mode) = 0;
     virtual ViewMode viewMode() const = 0;
 
+    // Re-rasterizes whatever is visible (the current page in single-page mode,
+    // the whole visible strip in continuous mode) asynchronously and repaints.
+    virtual void renderCurrentPage() = 0;
+
     // Text selection.
     virtual void setTextSelectionEnabled(bool enabled) = 0;
     virtual bool isTextSelectionEnabled() const = 0;

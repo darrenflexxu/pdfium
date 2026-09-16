@@ -77,6 +77,9 @@ public:
     qreal zoom() const override { return m_zoom; }
     int rotation() const override { return m_rotation; }
 
+    // Re-render the visible page(s) asynchronously and repaint.
+    void renderCurrentPage() override;
+
     // Coordinate mapping (PDF page space <-> widget pixels, rotation-aware).
     QPointF mapToPage(const QPoint& widgetPos) const override;
     QRectF pageRect() const override;
@@ -106,7 +109,6 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
-    void renderCurrentPage();
     void requestRender(int pageIndex);
     void waitForPendingRenders();
     void clearRenderCache();

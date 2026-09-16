@@ -109,7 +109,11 @@ private:
 
     AbstractPdfViewer* m_viewer = nullptr;
     QAction* m_gpuAction = nullptr;
-    bool m_gpuActive = false;
+
+    // Whether the currently installed viewer is the Skia GPU backend. Derived
+    // from m_viewer's concrete type so the state can never drift out of sync
+    // with the widget actually installed (no redundant m_gpuActive flag).
+    bool usingGpuViewer() const;
 
     int activePageCount() const;
     int activeCurrentPage() const;

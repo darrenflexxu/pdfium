@@ -39,7 +39,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // by this window, and is (re)attached on every renderer switch.
     m_viewer = createViewer(/* gpu */ true);
     setCentralWidget(m_viewer->widget());
-    m_gpuActive = true;
     
     PdfDocument* doc = new PdfDocument(this);
     m_viewer->setDocument(doc);
@@ -89,6 +88,15 @@ AbstractPdfViewer* MainWindow::createViewer(bool gpu) {
         return new SkiaPdfViewerWidget(this);
 #endif
     return new PdfViewerWidget(this);
+}
+
+bool MainWindow::usingGpuViewer() const {
+#ifdef SKIA_AVAILABLE
+    return m_viewer
+        && qobject_cast<SkiaPdfViewerWidget*>(m_viewer->widget()) != nullptr;
+#else
+    return false;
+#endif
 }
 
 MainWindow::~MainWindow() {
@@ -187,7 +195,7 @@ void MainWindow::createActions() {
     m_gpuAction = new QAction(tr("&GPU Acceleration"), this);
     m_gpuAction->setCheckable(true);
     m_gpuAction->setStatusTip(tr("Render pages through Skia GPU (OpenGL) instead of the CPU painter"));
-    m_gpuAction->setChecked(m_gpuActive);
+    m_gpuAction->setChecked(usingGpuViewer());
     m_gpuAction->setVisible(true);
     connect(m_gpuAction, &QAction::toggled, this, &MainWindow::toggleGpuAcceleration);
 #endif
@@ -780,7 +788,7 @@ void MainWindow::toggleGpuAcceleration(bool checked) {
     Q_UNUSED(checked);
     return;
 #else
-    if (!m_viewer || checked == m_gpuActive) return;
+    if (!m_viewer || checked == usingGpuViewer()) return;
 
     // Capture the current view state from the viewer being replaced.
     const int srcPage = m_viewer->currentPage();
@@ -817,8 +825,6 @@ void MainWindow::toggleGpuAcceleration(bool checked) {
 
     if (oldWidget)
         oldWidget->deleteLater();
-
-    m_gpuActive = checked;
 
     if (m_viewModeCombo) {
         if (m_viewModeCombo->currentIndex() != srcMode)

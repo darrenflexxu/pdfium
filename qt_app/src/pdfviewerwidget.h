@@ -57,6 +57,9 @@ public:
     void setViewMode(ViewMode mode) override;
     ViewMode viewMode() const override { return m_viewMode; }
 
+    // Re-render the visible page(s) asynchronously and repaint.
+    void renderCurrentPage() override;
+
     // Linear text-selection state (char map indices).
     int cursorCharIndex() const { return m_cursorIndex; }
     int selectionStart() const { return m_selectionStart; }

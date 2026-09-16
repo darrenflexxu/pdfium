@@ -788,6 +788,16 @@ void PdfViewerWidget::requestRender() {
     requestRender(m_currentPage);
 }
 
+void PdfViewerWidget::renderCurrentPage() {
+    if (!m_document || m_currentPage < 0 || m_pageCount <= 0) return;
+    if (m_viewMode == ViewMode::Continuous) {
+        refreshVisiblePages();
+    } else {
+        requestRender();
+    }
+    update();
+}
+
 void PdfViewerWidget::requestRender(int pageIndex) {
     if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount) return;
     
