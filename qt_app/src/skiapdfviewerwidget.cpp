@@ -941,8 +941,10 @@ void SkiaPdfViewerWidget::paintGL() {
     // macOS presents the native default framebuffer vertically flipped, so the
     // logical widget space (y down, y=0 at top) must be mirrored into the
     // surface: top of the widget -> bottom of the surface -> top on screen.
-    canvas->translate(0, h);
-    canvas->scale(dpr, -dpr);
+    if (!qEnvironmentVariableIsSet("SKIA_NO_FLIP")) {
+        canvas->translate(0, h);
+        canvas->scale(dpr, -dpr);
+    }
     drawViewContent(canvas);
     canvas->restore();
 
@@ -1021,9 +1023,18 @@ void SkiaPdfViewerWidget::drawViewContent(SkCanvas* canvas) {
     }
 
     const QRect viewport = viewportRect().toRect();
+    static const bool pageDebug = qEnvironmentVariableIsSet("SKIA_PAGE_DEBUG");
+    if (pageDebug)
+        qDebug().noquote() << "[PAGE] frame viewport=" << viewport
+                           << "count=" << m_pageCount
+                           << "current=" << m_currentPage;
     if (m_viewMode == ViewMode::Continuous) {
         for (int p = 0; p < m_pageCount; ++p) {
             const QRectF pr = pageRectOf(p);
+            if (pageDebug)
+                qDebug().noquote() << "[PAGE] p=" << p << "rect=" << pr.toRect()
+                                   << "size=" << pagePixelSize(p)
+                                   << "hit=" << pr.intersects(viewport);
             if (!pr.intersects(viewport)) continue;
             drawPageOnCanvas(canvas, p, pr);
             drawSearchHighlights(canvas, p, pr);
@@ -1103,6 +1114,13 @@ void SkiaPdfViewerWidget::drawPageOnCanvas(SkCanvas* canvas, int pageIndex,
             // transform applied in paintGL. That left every subsequent Qt-side
             // draw (page border, search highlights, text selection) rendered
             // without the y-flip, i.e. vertically mirrored.
+            static const bool pageDebug2 = qEnvironmentVariableIsSet("SKIA_PAGE_DEBUG");
+            if (pageDebug2)
+                qDebug().noquote()
+                    << "[PAGE] render p=" << pageIndex << "rect="
+                    << QRect(pageX, pageY, pageW, pageH) << "ok=" << success
+                    << "saveBefore=" << savedCount
+                    << "saveAfter=" << canvas->getSaveCount();
             canvas->restoreToCount(savedCount);
             if (!success) {
                 qDebug().noquote() << "[PROBE] RenderToCanvas FAILED page=" << pageIndex;

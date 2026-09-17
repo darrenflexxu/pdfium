@@ -119,6 +119,27 @@ void reportColorBBox(const QString& tag, const QImage& fb) {
                        << (ok ? "ALIGNED" : "MISALIGNED");
 }
 
+void reportInkRows(const QString& tag, const QImage& fb) {
+    if (fb.isNull()) return;
+    QString bands;
+    int start = -1;
+    for (int y = 0; y < fb.height(); ++y) {
+        int n = 0;
+        for (int x = 0; x < fb.width(); ++x) {
+            const QColor c(fb.pixel(x, y));
+            if (c.red() < 90 && c.green() < 90 && c.blue() < 90) ++n;
+        }
+        if (n > 0) {
+            if (start < 0) start = y;
+        } else if (start >= 0) {
+            bands += QString(" [%1..%2]").arg(start).arg(y - 1);
+            start = -1;
+        }
+    }
+    if (start >= 0) bands += QString(" [%1..%2]").arg(start).arg(fb.height() - 1);
+    qDebug().noquote() << "[PROBE] " << tag << "dark ink rows:" << bands;
+}
+
 void report(const QString& tag, const QImage& fb) {
     FbSummary s = summarize(fb);
     qDebug().noquote() << "[PROBE] " << tag
@@ -217,7 +238,10 @@ int main(int argc, char** argv) {
         qDebug().noquote() << "[PROBE] A: saved /tmp/real_gpu.png"
                            << "gpu grab size=" << gpuGrab.size()
                            << "dpr=" << gpu->devicePixelRatioF()
-                           << "pageRect=" << gpu->pageRect().toRect();
+                           << "pageRect=" << gpu->pageRect().toRect()
+                           << "mode=" << int(gpu->viewMode());
+        report("A-continuous", gpuGrab);
+        reportInkRows("A-continuous", gpuGrab);
         qDebug().noquote() << "[PROBE] A-END (grabbed)";
 
         // [PROBE] C: size sweep - find the canvas size where rendering fails.

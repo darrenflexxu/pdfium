@@ -161,12 +161,31 @@ source_set("fpdf_ext_skia") {
                 dcheck,
                 "// " + marker + ": allow real (non-kUnknown) canvas color types\n"
                 "  // for clients that render directly onto an external SkCanvas.")
+            d_content = d_content.replace(
+                "FX_RECT CFX_SkiaDeviceDriver::GetClipBox() const {\n"
+                "  SkIRect clip = canvas_->getDeviceClipBounds();\n"
+                "  return FX_RECT(clip.fLeft, clip.fTop, clip.fRight, clip.fBottom);\n"
+                "}",
+                "FX_RECT CFX_SkiaDeviceDriver::GetClipBox() const {\n"
+                "  SkIRect clip = canvas_->getDeviceClipBounds();\n"
+                "  if (external_canvas_) {\n"
+                "    SkMatrix inverse;\n"
+                "    if (canvas_->getTotalMatrix().invert(&inverse)) {\n"
+                "      const SkRect local = inverse.mapRect(SkRect::Make(clip));\n"
+                "      return FX_RECT(SkScalarFloorToInt(local.left()),\n"
+                "                   SkScalarFloorToInt(local.top()),\n"
+                "                   SkScalarCeilToInt(local.right()),\n"
+                "                   SkScalarCeilToInt(local.bottom()));\n"
+                "    }\n"
+                "  }\n"
+                "  return FX_RECT(clip.fLeft, clip.fTop, clip.fRight, clip.fBottom);\n"
+                "}")
             skia_device_cpp.write_text(d_content)
-            print("Relaxed external-canvas color-type DCHECK in fx_skia_device.cpp")
         elif marker in d_content:
             print("fx_skia_device.cpp already relaxed")
         else:
             print("Warning: color-type DCHECK not found in fx_skia_device.cpp")
+
 
     return True
 
