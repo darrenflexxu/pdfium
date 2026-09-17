@@ -1073,12 +1073,37 @@ void SkiaPdfViewerWidget::drawPageOnCanvas(SkCanvas* canvas, int pageIndex,
         IPdfDocument* doc = m_document->interface();
         IPdfPage* page = doc ? doc->GetPage(pageIndex) : nullptr;
         if (page) {
+            const int savedCount = canvas->getSaveCount();
             canvas->save();
-            canvas->translate(widgetRect.x(), widgetRect.y());
-            bool success = page->RenderToCanvas(canvas, widgetRect.width(),
-                                               widgetRect.height(), m_rotation,
-                                               PDF_RENDER_ANNOTATIONS);
-            canvas->restore();
+            // Pass the page rectangle to PDFium instead of translating the
+            // canvas: the Skia device driver reports its clip box in device
+            // pixels (canvas_->getDeviceClipBounds()), so PDFium's object
+            // culling assumes its layout rectangle starts at the canvas
+            // origin. Pre-translating the canvas shifts that clip box out of
+            // PDFium's coordinate space and culls visible content when zoomed.
+            const int pageX = qRound(widgetRect.x());
+            const int pageY = qRound(widgetRect.y());
+            const int pageW = qRound(widgetRect.width());
+            const int pageH = qRound(widgetRect.height());
+            // PDFium does not paint the default page background when rendering
+            // to an external SkCanvas. FPDF_RenderPageBitmap clears its bitmap
+            // to white first, so the bitmap path gets a white page; fill it
+            // here too, otherwise white/light page elements would be invisible
+            // against the widget's dark background.
+            SkPaint bgPaint;
+            bgPaint.setColor(SK_ColorWHITE);
+            canvas->drawRect(SkRect::MakeXYWH(pageX, pageY, pageW, pageH), bgPaint);
+            bool success = page->RenderToCanvas(canvas, pageX, pageY, pageW,
+                                                pageH, m_rotation,
+                                                PDF_RENDER_ANNOTATIONS);
+            // Restore to the exact save level we started at instead of a plain
+            // restore(): PDFium's external-canvas render pops the canvas level
+            // our save() pushed (after-render save count == savedCount), so a
+            // plain restore() would over-pop and drop the presentation
+            // transform applied in paintGL. That left every subsequent Qt-side
+            // draw (page border, search highlights, text selection) rendered
+            // without the y-flip, i.e. vertically mirrored.
+            canvas->restoreToCount(savedCount);
             if (!success) {
                 qDebug().noquote() << "[PROBE] RenderToCanvas FAILED page=" << pageIndex;
                 drawCenteredString(canvas, QStringLiteral("Render Error"),

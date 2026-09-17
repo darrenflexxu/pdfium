@@ -23,6 +23,7 @@
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkPixmap.h"
+#include "include/core/SkSurface.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -200,7 +201,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         const bool rendered =
-            page->RenderToCanvas(wcanvas, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+            page->RenderToCanvas(wcanvas, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
         page->Release();
         grCtx->flushAndSubmit();
         if (!rendered) {
@@ -242,7 +243,273 @@ int main(int argc, char** argv) {
         std::cout << "HARNESS STAGE2 " << (directPass ? "PASS" : "FAIL")
                   << "  directInk=" << directInk << " refInk=" << refInk
                   << " mismatch(>48)=" << mismatch << "/" << total << "\n";
-        if (!directPass) return 1;
+
+        // Diagnostic: per-band ink coverage (detects whole regions that failed
+        // to render). Also dump both images for offline inspection.
+        {
+            cpuImg.save(QStringLiteral("/tmp/harness_ref.png"));
+            QImage directImg(reinterpret_cast<const uchar*>(directBuf.data()),
+                             kW, kH, rowBytes, QImage::Format_RGBA8888);
+            directImg.save(QStringLiteral("/tmp/harness_direct.png"));
+
+            int rx0 = kW, ry0 = kH, rx1 = -1, ry1 = -1;
+            int dx0 = kW, dy0 = kH, dx1 = -1, dy1 = -1;
+            for (int y = 0; y < kH; ++y) {
+                const uint8_t* cpuLine = cpuImg.constScanLine(y);
+                const uint8_t* gpuLine = &directBuf[static_cast<size_t>(y) * rowBytes];
+                for (int x = 0; x < kW; ++x) {
+                    if (cpuLine[0] < 250 || cpuLine[1] < 250 || cpuLine[2] < 250) {
+                        rx0 = std::min(rx0, x); rx1 = std::max(rx1, x);
+                        ry0 = std::min(ry0, y); ry1 = std::max(ry1, y);
+                    }
+                    if (gpuLine[0] < 250 || gpuLine[1] < 250 || gpuLine[2] < 250) {
+                        dx0 = std::min(dx0, x); dx1 = std::max(dx1, x);
+                        dy0 = std::min(dy0, y); dy1 = std::max(dy1, y);
+                    }
+                    cpuLine += 4;
+                    gpuLine += 4;
+                }
+            }
+            std::cout << "  bbox ref=[" << rx0 << "," << ry0 << " " << rx1 << ","
+                      << ry1 << "] direct=[" << dx0 << "," << dy0 << " " << dx1
+                      << "," << dy1 << "]\n";
+
+            const char* names[3] = {"top", "mid", "bot"};
+            for (int band = 0; band < 3; ++band) {
+                const int y0 = kH * band / 3;
+                const int y1 = kH * (band + 1) / 3;
+                int r = 0, d = 0;
+                for (int y = y0; y < y1; ++y) {
+                    const uint8_t* cpuLine = cpuImg.constScanLine(y);
+                    const uint8_t* gpuLine = &directBuf[static_cast<size_t>(y) * rowBytes];
+                    for (int x = 0; x < kW; ++x) {
+                        if (cpuLine[0] < 250 || cpuLine[1] < 250 || cpuLine[2] < 250) ++r;
+                        if (gpuLine[0] < 250 || gpuLine[1] < 250 || gpuLine[2] < 250) ++d;
+                        cpuLine += 4;
+                        gpuLine += 4;
+                    }
+                }
+                std::cout << "  band " << names[band]
+                          << " ref=" << r << " direct=" << d << "\n";
+            }
+        }
+
+        if (!directPass) {
+            std::cout << "  (images: /tmp/harness_ref.png /tmp/harness_direct.png)\n";
+            return 1;
+        }
+
+        // Diagnostic: does PDFium paint the page's default white background
+        // onto an external canvas, or leave the existing pixels? (The bitmap
+        // path starts from a white bitmap; the widget clears to dark grey.)
+        {
+            SkCanvas* c = wrapped->getCanvas();
+            c->clear(SkColorSetARGB(255, 128, 128, 128));
+            IPdfPage* fp = doc.interface()->GetPage(0);
+            if (fp) {
+                fp->RenderToCanvas(c, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+                fp->Release();
+            }
+            grCtx->flushAndSubmit();
+            std::vector<uint8_t> bgBuf(rowBytes * kH);
+            if (wrapped->readPixels(readInfo, bgBuf.data(), rowBytes, 0, 0)) {
+                int white = 0, gray = 0, other = 0;
+                for (int y = 0; y < kH; ++y) {
+                    const uint8_t* p = &bgBuf[static_cast<size_t>(y) * rowBytes];
+                    for (int x = 0; x < kW; ++x) {
+                        const int r = p[0], g = p[1], b = p[2];
+                        if (r > 250 && g > 250 && b > 250) ++white;
+                        else if (std::abs(r - 128) < 8 && std::abs(g - 128) < 8 &&
+                                 std::abs(b - 128) < 8) ++gray;
+                        else ++other;
+                        p += 4;
+                    }
+                }
+                std::cout << "  bgcheck white=" << white << " gray=" << gray
+                          << " other=" << other << "/" << total << "\n";
+            }
+        }
+
+        // Stage 2C: replicate the widget's flipped canvas transform
+        // (translate(0,h) + scale(dpr,-dpr)) to check whether the y-flip
+        // interacts with PDFium's device clip/display matrix and drops content.
+        {
+            SkCanvas* c = wrapped->getCanvas();
+            c->clear(SK_ColorWHITE);
+            c->save();
+            c->translate(0, kH);
+            c->scale(1, -1);
+            IPdfPage* fp = doc.interface()->GetPage(0);
+            if (fp) {
+                fp->RenderToCanvas(c, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+                fp->Release();
+            }
+            c->restore();
+            grCtx->flushAndSubmit();
+
+            std::vector<uint8_t> flipBuf(rowBytes * kH);
+            if (wrapped->readPixels(readInfo, flipBuf.data(), rowBytes, 0, 0)) {
+                int fdiff = 0, fink = 0;
+                for (int y = 0; y < kH; ++y) {
+                    const uint8_t* a =
+                        &directBuf[static_cast<size_t>(kH - 1 - y) * rowBytes];
+                    const uint8_t* b = &flipBuf[static_cast<size_t>(y) * rowBytes];
+                    for (int x = 0; x < kW; ++x) {
+                        if (std::abs(int(a[0]) - int(b[0])) > 12 ||
+                            std::abs(int(a[1]) - int(b[1])) > 12 ||
+                            std::abs(int(a[2]) - int(b[2])) > 12)
+                            ++fdiff;
+                        if (b[0] < 250 || b[1] < 250 || b[2] < 250) ++fink;
+                        a += 4;
+                        b += 4;
+                    }
+                }
+                std::cout << "HARNESS STAGE2C flip diff=" << fdiff << "/" << total
+                          << " ink=" << fink << " (unflipped ink=" << directInk
+                          << ")\n";
+            }
+        }
+
+        // Stage 4: zoom/cull regression. The widget draws a page larger than
+        // the viewport by passing a negative start offset (page centered).
+        // PDFium culls objects using a clip box derived from the canvas'
+        // device clip bounds, so the visible region must match the same region
+        // of a full-size render. Guards the "elements disappear when zooming"
+        // bug caused by baking the offset into the canvas transform.
+        {
+            const int zW = kW * 2, zH = kH * 2;
+            // Reference: CPU (AGG) bitmap render at the zoomed size. This
+            // path is independent of the Skia external-canvas clip box, so it
+            // is a reliable reference for what the visible region must contain.
+            QImage cpuZoom;
+            QEventLoop zloop;
+            QMetaObject::Connection zc = QObject::connect(
+                &doc, &PdfDocument::renderFinished,
+                [&](int, QImage img, bool ok) {
+                    if (ok) cpuZoom = img;
+                    zloop.quit();
+                });
+            doc.requestRender(0, QSize(zW, zH), 0);
+            zloop.exec();
+            QObject::disconnect(zc);
+            if (cpuZoom.isNull()) {
+                std::cout << "HARNESS STAGE4 FATAL: CPU zoom render failed\n";
+                return 1;
+            }
+
+            // Pick a viewport-sized window over the zoomed page that actually
+            // contains content (from the reference's ink bbox), so the test is
+            // meaningful for pages whose content is not centered. The window
+            // origin is passed to PDFium as the layout rectangle offset.
+            int bx0 = zW, by0 = zH, bx1 = -1, by1 = -1;
+            for (int y = 0; y < cpuZoom.height(); ++y) {
+                const uint8_t* p = cpuZoom.constScanLine(y);
+                for (int x = 0; x < cpuZoom.width(); ++x) {
+                    if (p[0] < 250 || p[1] < 250 || p[2] < 250) {
+                        bx0 = std::min(bx0, x);
+                        bx1 = std::max(bx1, x);
+                        by0 = std::min(by0, y);
+                        by1 = std::max(by1, y);
+                    }
+                    p += 4;
+                }
+            }
+            int cropX = 0, cropY = 0;
+            if (bx1 >= bx0) {
+                cropX = std::max(0, std::min(zW - kW, (bx0 + bx1) / 2 - kW / 2));
+                cropY = std::max(0, std::min(zH - kH, (by0 + by1) / 2 - kH / 2));
+            }
+            const int offX = -cropX, offY = -cropY;
+
+            // Widget emulation: zoomed page centered on the viewport-sized
+            // canvas, offset passed to PDFium (not baked into the transform).
+            SkCanvas* c = wrapped->getCanvas();
+            c->clear(SK_ColorWHITE);
+            IPdfPage* wp = doc.interface()->GetPage(0);
+            bool ok = wp && wp->RenderToCanvas(c, offX, offY, zW, zH, 0,
+                                               PDF_RENDER_ANNOTATIONS);
+            if (wp) wp->Release();
+            grCtx->flushAndSubmit();
+            std::vector<uint8_t> emuBuf(static_cast<size_t>(rowBytes) * kH, 0);
+            ok = ok && wrapped->readPixels(readInfo, emuBuf.data(), rowBytes, 0, 0);
+            if (ok) {
+                int zrefInk = 0, emuInk = 0, zdiff = 0;
+                for (int y = 0; y < kH; ++y) {
+                    // cpuZoom is ARGB32_Premultiplied (B,G,R,A bytes);
+                    // emuBuf is RGBA readback.
+                    const uint8_t* rl =
+                        cpuZoom.constScanLine(cropY + y) + cropX * 4;
+                    const uint8_t* el = &emuBuf[static_cast<size_t>(y) * rowBytes];
+                    for (int x = 0; x < kW; ++x) {
+                        if (rl[0] < 250 || rl[1] < 250 || rl[2] < 250) ++zrefInk;
+                        if (el[0] < 250 || el[1] < 250 || el[2] < 250) ++emuInk;
+                        if (std::abs(int(rl[2]) - int(el[0])) > 48 ||
+                            std::abs(int(rl[1]) - int(el[1])) > 48 ||
+                            std::abs(int(rl[0]) - int(el[2])) > 48) ++zdiff;
+                        rl += 4;
+                        el += 4;
+                    }
+                }
+                const bool inkOk =
+                    zrefInk == 0
+                        ? emuInk <= total / 200
+                        : (emuInk >= zrefInk / 2 && emuInk <= zrefInk * 3 + 500);
+                const bool zpass = inkOk && zdiff <= total / 8;
+                std::cout << "HARNESS STAGE4 zoom " << (zpass ? "PASS" : "FAIL")
+                          << " off=" << offX << "," << offY
+                          << " refInk=" << zrefInk << " emuInk=" << emuInk
+                          << " diff(>48)=" << zdiff << "/" << total << "\n";
+                if (!zpass) {
+                    cpuZoom.copy(cropX, cropY, kW, kH)
+                        .save(QStringLiteral("/tmp/harness_zoom_ref.png"));
+                    QImage emuImg(emuBuf.data(), kW, kH, rowBytes,
+                                  QImage::Format_RGBA8888);
+                    emuImg.save(QStringLiteral("/tmp/harness_zoom_emu.png"));
+                    return 1;
+                }
+            } else {
+                std::cout << "HARNESS STAGE4 FATAL\n";
+                return 1;
+            }
+
+            // Sanity check: emulate the OLD (buggy) approach that bakes the
+            // offset into the canvas transform, to confirm this test detects
+            // the bug (large diff) rather than passing vacuously.
+            {
+                SkCanvas* oc = wrapped->getCanvas();
+                oc->clear(SK_ColorWHITE);
+                oc->save();
+                oc->translate(offX, offY);
+                IPdfPage* op = doc.interface()->GetPage(0);
+                if (op) {
+                    op->RenderToCanvas(oc, 0, 0, zW, zH, 0,
+                                       PDF_RENDER_ANNOTATIONS);
+                    op->Release();
+                }
+                oc->restore();
+                grCtx->flushAndSubmit();
+                std::vector<uint8_t> oldBuf(static_cast<size_t>(rowBytes) * kH, 0);
+                if (wrapped->readPixels(readInfo, oldBuf.data(), rowBytes, 0, 0)) {
+                    int oldDiff = 0, oldInk = 0;
+                    for (int y = 0; y < kH; ++y) {
+                        const uint8_t* rl =
+                            cpuZoom.constScanLine(cropY + y) + cropX * 4;
+                        const uint8_t* ol =
+                            &oldBuf[static_cast<size_t>(y) * rowBytes];
+                        for (int x = 0; x < kW; ++x) {
+                            if (ol[0] < 250 || ol[1] < 250 || ol[2] < 250) ++oldInk;
+                            if (std::abs(int(rl[2]) - int(ol[0])) > 48 ||
+                                std::abs(int(rl[1]) - int(ol[1])) > 48 ||
+                                std::abs(int(rl[0]) - int(ol[2])) > 48) ++oldDiff;
+                            rl += 4;
+                            ol += 4;
+                        }
+                    }
+                    std::cout << "  STAGE4 old(baked translate) ink=" << oldInk
+                              << " diff=" << oldDiff << "/" << total << "\n";
+                }
+            }
+        }
 
         // Stage 3: micro-benchmark of the direct RenderToCanvas path (plan §12
         // step 4). Measures the per-frame cost of drawing the page straight
@@ -253,7 +520,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < kIters; ++i) {
                 IPdfPage* bp = doc.interface()->GetPage(0);
                 if (!bp) break;
-                bp->RenderToCanvas(wrapped->getCanvas(), kW, kH, 0,
+                bp->RenderToCanvas(wrapped->getCanvas(), 0, 0, kW, kH, 0,
                                    PDF_RENDER_ANNOTATIONS);
                 bp->Release();
             }

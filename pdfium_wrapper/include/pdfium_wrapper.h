@@ -202,9 +202,15 @@ struct IPdfPage : public IPdfUnknown {
     virtual bool Render(int width, int height, int rotation, int flags,
                         void* buffer, int stride) = 0;
 
-    // Renders the page directly onto a Skia canvas.
-    virtual bool RenderToCanvas(SkCanvas* canvas, int width, int height,
-                                int rotation, int flags) = 0;
+    // Renders the page directly onto a Skia canvas. The page is laid out into
+    // the rectangle (start_x, start_y, start_x + width, start_y + height) in
+    // the canvas' current coordinate space, exactly like FPDF_RenderPageBitmap.
+    // The caller must NOT pre-translate the canvas for this rectangle: PDFium
+    // derives its clip box in device pixels from the canvas, so baking the
+    // offset into the canvas transform makes PDFium cull visible content.
+    virtual bool RenderToCanvas(SkCanvas* canvas, int start_x, int start_y,
+                                int width, int height, int rotation,
+                                int flags) = 0;
 
     virtual void GetSize(double* width, double* height) = 0;
     virtual int GetIndex() = 0;

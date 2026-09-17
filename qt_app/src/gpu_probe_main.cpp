@@ -67,6 +67,58 @@ FbSummary summarize(const QImage& img) {
     return s;
 }
 
+void reportPageBg(const QString& tag, const QImage& fb, const QRectF& pageRect) {
+    if (fb.isNull() || pageRect.isEmpty()) return;
+    const qreal dpr = fb.devicePixelRatio();
+    QRect pr = QRectF(pageRect.x() * dpr, pageRect.y() * dpr,
+                      pageRect.width() * dpr, pageRect.height() * dpr)
+                   .toRect()
+                   .intersected(fb.rect());
+    if (pr.width() < 20 || pr.height() < 20) return;
+    const int inset = 8;
+    const QPoint pts[4] = {
+        QPoint(pr.left() + inset, pr.top() + inset),
+        QPoint(pr.right() - inset, pr.top() + inset),
+        QPoint(pr.left() + inset, pr.bottom() - inset),
+        QPoint(pr.right() - inset, pr.bottom() - inset),
+    };
+    QString out;
+    for (const QPoint& p : pts) {
+        QColor c(fb.pixel(p));
+        out += QString(" (%1,%2,%3)").arg(c.red()).arg(c.green()).arg(c.blue());
+    }
+    qDebug().noquote() << "[PROBE] " << tag << "pageBg samples:" << out;
+}
+
+void reportColorBBox(const QString& tag, const QImage& fb) {
+    if (fb.isNull()) return;
+    QRect hl(fb.width(), fb.height(), 0, 0);
+    QRect dk(fb.width(), fb.height(), 0, 0);
+    int hlN = 0, dkN = 0;
+    for (int y = 0; y < fb.height(); ++y) {
+        for (int x = 0; x < fb.width(); ++x) {
+            const QColor c(fb.pixel(x, y));
+            // Selection highlight blended over white ~ (165,207,241).
+            if (c.blue() > c.red() + 35 && c.blue() > 180) {
+                ++hlN;
+                hl = hl.united(QRect(x, y, 1, 1));
+            }
+            if (c.red() < 90 && c.green() < 90 && c.blue() < 90) {
+                ++dkN;
+                dk = dk.united(QRect(x, y, 1, 1));
+            }
+        }
+    }
+    // The highlight must cover the selected glyphs: if it were y-mirrored its
+    // vertical band would not overlap the dark text band.
+    const bool ok = hlN > 0 && dkN > 0 && hl.top() <= dk.bottom() &&
+                    dk.top() <= hl.bottom();
+    qDebug().noquote() << "[PROBE] " << tag << "highlight bbox="
+                       << (hlN ? hl : QRect()) << "n=" << hlN
+                       << " dark bbox=" << (dkN ? dk : QRect()) << "n=" << dkN
+                       << (ok ? "ALIGNED" : "MISALIGNED");
+}
+
 void report(const QString& tag, const QImage& fb) {
     FbSummary s = summarize(fb);
     qDebug().noquote() << "[PROBE] " << tag
@@ -223,10 +275,23 @@ int main(int argc, char** argv) {
                                << pr.topLeft() + dev;
         }
 
+        // Derive valid click points from the actual glyph boxes so this works
+        // for any test PDF/page size.
         const QPoint base = [&]() {
             const QRectF pr = gpu->pageRect();
-            const QPointF dev = doc->pageToDevice(0, QPointF(80, 744),
-                                                  QPoint(0, 0),
+            const QVector<CharInfo>& cm = doc->charMap(0);
+            const QRectF c = cm.isEmpty() ? QRectF(80, 100, 10, 10)
+                                          : cm.first().bounds;
+            const QPointF dev = doc->pageToDevice(0, c.center(), QPoint(0, 0),
+                                                  pr.size().toSize(), 0);
+            return (pr.topLeft() + dev).toPoint();
+        }();
+        const QPoint dragEnd = [&]() {
+            const QRectF pr = gpu->pageRect();
+            const QVector<CharInfo>& cm = doc->charMap(0);
+            const QRectF c = cm.isEmpty() ? QRectF(80, 60, 10, 10)
+                                          : cm.last().bounds;
+            const QPointF dev = doc->pageToDevice(0, c.center(), QPoint(0, 0),
                                                   pr.size().toSize(), 0);
             return (pr.topLeft() + dev).toPoint();
         }();
@@ -265,14 +330,13 @@ int main(int argc, char** argv) {
             pumpFor(150);
         }
 
-        // Drag-select: press at base, move across several lines, release.
-        qDebug().noquote() << "[PROBE] D: drag from" << base << "by"
-                           << QPoint(0, 300);
+        // Drag-select: press at the first glyph, move to the last, release.
+        qDebug().noquote() << "[PROBE] D: drag from" << base << "to" << dragEnd;
         {
             QMouseEvent p(QEvent::MouseButtonPress, QPointF(base),
                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QApplication::sendEvent(gpu, &p);
-            const QPoint end = base + QPoint(0, 300);
+            const QPoint end = dragEnd;
             for (int step = 1; step <= 5; ++step) {
                 QPointF pos = QPointF(base) + (QPointF(end) - QPointF(base)) *
                                               (step / 5.0);
@@ -290,7 +354,25 @@ int main(int argc, char** argv) {
 
         QImage fb = gpu->grabFramebuffer();
         report("D framebuffer after click", fb);
+        reportPageBg("D", fb, gpu->pageRect());
+        reportColorBBox("D", fb);
+        fb.save("/tmp/probe_D_sel.png");
+        qDebug().noquote() << "[PROBE] D: saved /tmp/probe_D_sel.png"
+                           << fb.size();
         qDebug().noquote() << "[PROBE] D-END (clicked, alive)";
+
+        // Zoom regression: the page rect becomes larger than the viewport and
+        // is offset. PDFium must still render the visible region (the Skia
+        // device culls using a device-pixel clip box).
+        for (qreal z : {2.0, 4.0}) {
+            gpu->setZoom(z);
+            pumpFor(300);
+            QImage zfb = gpu->grabFramebuffer();
+            report(QStringLiteral("D zoom %1 framebuffer").arg(z), zfb);
+            reportPageBg(QStringLiteral("D zoom %1").arg(z), zfb, gpu->pageRect());
+        }
+        gpu->setZoom(1.0);
+        pumpFor(200);
     }
 
     qDebug().noquote() << "[PROBE] done";

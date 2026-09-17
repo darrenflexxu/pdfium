@@ -391,10 +391,12 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
 
     bool Render(int width, int height, int rotation, int flags,
                             void* buffer, int stride) override;
-    bool RenderToCanvas(SkCanvas* canvas, int width, int height, int rotation, int flags) override {
+    bool RenderToCanvas(SkCanvas* canvas, int start_x, int start_y, int width,
+                        int height, int rotation, int flags) override {
         PDFIUM_SCOPE_LOCK;
         if (!page || !canvas) return false;
-        return FPDF_RenderPageToCanvas(page, 0, 0, width, height, rotation, flags, canvas);
+        return FPDF_RenderPageToCanvas(page, start_x, start_y, width, height,
+                                       rotation, flags, canvas);
     }
 
 
