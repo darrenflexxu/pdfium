@@ -33,6 +33,14 @@ extern "C" {
                                    void* user);
     int   FPDF_GetLastCompressStats(void* s);
 }
+
+// Direct Skia rendering extension (defined in pdfium_extensions/core/fpdf_ext_skia.cpp).
+// Declared here instead of including the extension header so the wrapper does not
+// pull in PDFium-internal / Skia headers.
+struct SkCanvas;
+bool FPDF_RenderPageToCanvas(FPDF_PAGE page, int start_x, int start_y,
+                             int size_x, int size_y, int rotation, int flags,
+                             SkCanvas* canvas);
 #endif
 
 // ============================================================
@@ -382,7 +390,14 @@ struct PdfPageImpl : public IPdfPage, public RefCounted {
     void Release() override { RefCounted::Release(); }
 
     bool Render(int width, int height, int rotation, int flags,
-                void* buffer, int stride) override;
+                            void* buffer, int stride) override;
+    bool RenderToCanvas(SkCanvas* canvas, int width, int height, int rotation, int flags) override {
+        PDFIUM_SCOPE_LOCK;
+        if (!page || !canvas) return false;
+        return FPDF_RenderPageToCanvas(page, 0, 0, width, height, rotation, flags, canvas);
+    }
+
+
     void GetSize(double* width, double* height) override {
         PDFIUM_SCOPE_LOCK;
         double w = 0, h = 0;

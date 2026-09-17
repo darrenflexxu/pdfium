@@ -62,3 +62,4 @@ build_xcode/*
 build_scripts/__pycache__/*
 build_release/*
 build_skia/*
+build_skia_debug/*

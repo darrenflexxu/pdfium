@@ -141,13 +141,16 @@ enum PDF_CompressFlags {
     PDF_COMPRESS_DEFAULT = PDF_COMPRESS_LOSSLESS | PDF_COMPRESS_LINEARIZE,
 };
 
-// ============================================================
-// Forward declarations of interfaces
-// ============================================================
+// Forward declaration for Skia Canvas.
+class SkCanvas;
+
 struct IPdfDocument;
 struct IPdfPage;
 struct IPdfElement;
 struct IPdfOutline;
+
+// Forward declaration for Skia canvas (passed as opaque pointer across DLL)
+struct SkCanvas;
 
 // ============================================================
 // IPdfUnknown: base interface with ref-counting lifetime
@@ -198,6 +201,11 @@ struct IPdfPage : public IPdfUnknown {
     // Returns true on success
     virtual bool Render(int width, int height, int rotation, int flags,
                         void* buffer, int stride) = 0;
+
+    // Renders the page directly onto a Skia canvas.
+    virtual bool RenderToCanvas(SkCanvas* canvas, int width, int height,
+                                int rotation, int flags) = 0;
+
     virtual void GetSize(double* width, double* height) = 0;
     virtual int GetIndex() = 0;
 

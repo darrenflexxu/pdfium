@@ -20,6 +20,7 @@
 #ifdef SKIA_AVAILABLE
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QSurfaceFormat>
 
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
@@ -107,12 +108,26 @@ SkiaPdfViewerWidget::SkiaPdfViewerWidget(QWidget* parent)
     : QWidget(parent)
 #endif
 {
+#ifdef SKIA_AVAILABLE
+    // Skia's Ganesh GL backend emits shaders that use GLSL 1.30+ features
+    // (e.g. gl_VertexID in the glyph-atlas shader). Qt defaults to a legacy
+    // OpenGL 2.1 / GLSL 1.20 context on macOS, where those fail to compile,
+    // so request a 3.3 core-profile context before the widget is shown.
+    {
+        QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+        fmt.setRenderableType(QSurfaceFormat::OpenGL);
+        fmt.setVersion(3, 3);
+        fmt.setProfile(QSurfaceFormat::CoreProfile);
+        fmt.setDepthBufferSize(24);
+        fmt.setStencilBufferSize(8);
+        setFormat(fmt);
+    }
+#endif
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
 }
 
 SkiaPdfViewerWidget::~SkiaPdfViewerWidget() {
-    waitForPendingRenders();
     // NOTE: do NOT disconnect(m_document, ...) here.  The document may
     // have already been destroyed (e.g. sibling child of a parent that
     // destroys in creation order).  Qt auto-disconnects all signal
@@ -120,22 +135,18 @@ SkiaPdfViewerWidget::~SkiaPdfViewerWidget() {
 }
 
 void SkiaPdfViewerWidget::setDocument(PdfDocument* document) {
-    waitForPendingRenders();
-
     if (m_document) {
         disconnect(m_document, nullptr, this, nullptr);
     }
 
+
     m_document = document;
     m_currentPage = -1;
     m_pageCount = 0;
-    clearRenderCache();
     clearTextSelectionState();
     m_scrollOffset = QPoint(0, 0);
 
     if (m_document) {
-        connect(m_document, &PdfDocument::renderFinished,
-                this, &SkiaPdfViewerWidget::onRenderFinished);
         connect(m_document, &PdfDocument::loadFinished,
                 this, &SkiaPdfViewerWidget::onLoadFinished);
         m_pageCount = m_document->pageCount();
@@ -151,13 +162,11 @@ void SkiaPdfViewerWidget::setDocument(PdfDocument* document) {
 bool SkiaPdfViewerWidget::loadFile(const QString& filePath, const QString& password) {
     if (!m_document)
         return false;
-    waitForPendingRenders();
 
     m_currentPage = -1;
     m_pageCount = 0;
     m_zoom = 1.0;
     m_rotation = 0;
-    clearRenderCache();
     clearTextSelectionState();
     m_scrollOffset = QPoint(0, 0);
 
@@ -193,9 +202,6 @@ void SkiaPdfViewerWidget::setZoom(qreal zoom) {
     if (qFuzzyCompare(zoom, m_zoom)) return;
 
     m_zoom = zoom;
-    // The rendered pixels no longer match the new scale; drop them so the pages
-    // are re-rendered by the GPU pipeline at the new pixel size.
-    clearRenderCache();
     renderCurrentPage();
     emit zoomChanged(m_zoom);
 }
@@ -205,7 +211,6 @@ void SkiaPdfViewerWidget::setRotation(int rotation) {
     if (rotation == m_rotation) return;
 
     m_rotation = rotation;
-    clearRenderCache();
     renderCurrentPage();
     emit rotationChanged(m_rotation);
 }
@@ -409,14 +414,10 @@ void SkiaPdfViewerWidget::setScrollToPage(int pageIndex) {
 void SkiaPdfViewerWidget::refreshVisiblePages() {
     if (!m_document || !m_document->isLoaded() || m_pageCount <= 0) return;
     if (m_viewMode != ViewMode::Continuous) return;
-
-    const QRect viewport = rect();
-    for (int p = 0; p < m_pageCount; ++p) {
-        QRectF pr = pageRectOf(p);
-        if (pr.intersects(viewport)) requestRender(p);
-    }
-    updateCurrentPageForViewport();
+    
+    update();
 }
+
 
 void SkiaPdfViewerWidget::updateCurrentPageForViewport() {
     if (m_viewMode != ViewMode::Continuous || m_pageCount <= 0) return;
@@ -426,7 +427,6 @@ void SkiaPdfViewerWidget::updateCurrentPageForViewport() {
     if (p >= 0 && p != m_currentPage) {
         m_currentPage = p;
         clearTextSelectionState();
-        requestRender(p);
         emit pageChanged(p);
     }
 }
@@ -522,54 +522,11 @@ QRectF SkiaPdfViewerWidget::mapRectFromPageOnPage(const QRectF& pdfRect,
 // ---------------------------------------------------------------------------
 
 void SkiaPdfViewerWidget::renderCurrentPage() {
-    if (!m_document || m_currentPage < 0 || m_pageCount <= 0) return;
-    if (m_viewMode == ViewMode::Continuous) {
-        refreshVisiblePages();
-    } else {
-        requestRender(m_currentPage);
-    }
     update();
 }
 
-void SkiaPdfViewerWidget::requestRender(int pageIndex) {
-    if (!m_document || pageIndex < 0 || pageIndex >= m_pageCount) return;
 
-    QRectF pRect = pageRectOf(pageIndex);
-    if (pRect.isEmpty()) return;
 
-    QSize renderSize = pRect.size().toSize();
-    renderSize = renderSize.boundedTo(QSize(8192, 8192));
-    if (renderSize.isEmpty()) return;
-
-    // Cache hit: a page rendered at this exact size/rotation is already present.
-    const auto cacheIt = m_renderedPages.constFind(pageIndex);
-    if (cacheIt != m_renderedPages.constEnd() && cacheIt->size() == renderSize)
-        return;
-
-    if (m_pendingPages.contains(pageIndex)) return;
-    m_pendingPages.insert(pageIndex);
-
-    if (m_renderFutures.size() > 128) {
-        m_renderFutures.erase(
-            std::remove_if(m_renderFutures.begin(), m_renderFutures.end(),
-                           [](const QFuture<void>& f) { return f.isFinished(); }),
-            m_renderFutures.end());
-    }
-    m_renderFutures.append(m_document->requestRender(pageIndex, renderSize, m_rotation));
-}
-
-void SkiaPdfViewerWidget::waitForPendingRenders() {
-    for (QFuture<void>& future : m_renderFutures) {
-        if (!future.isFinished()) future.waitForFinished();
-    }
-    m_renderFutures.clear();
-    m_pendingPages.clear();
-}
-
-void SkiaPdfViewerWidget::clearRenderCache() {
-    m_renderedPages.clear();
-    m_pendingPages.clear();
-}
 
 void SkiaPdfViewerWidget::clearTextSelectionState() {
     m_selecting = false;
@@ -972,7 +929,6 @@ void SkiaPdfViewerWidget::paintGL() {
                        << "fboPx=" << w << "x" << h
                        << "fbo=" << fbInfo.fFBOID
                        << "page=" << m_currentPage
-                       << "cache=" << m_renderedPages.keys()
                        << "pageRect=" << pageRectOf(m_currentPage).toRect();
 
     SkCanvas* canvas = surface->getCanvas();
@@ -1104,51 +1060,50 @@ void SkiaPdfViewerWidget::drawViewContent(SkCanvas* canvas) {
 }
 
 void SkiaPdfViewerWidget::drawPageOnCanvas(SkCanvas* canvas, int pageIndex,
-                                           const QRectF& widgetRect) {
+                                            const QRectF& widgetRect) {
     // Page shadow.
     SkPaint shadow;
     shadow.setColor(SkColorSetARGB(80, 0, 0, 0));
     canvas->drawRect(SkRect::MakeXYWH(widgetRect.x() + 4, widgetRect.y() + 4,
-                                      widgetRect.width(), widgetRect.height()),
-                     shadow);
-
-    // Page image (PDFium BGRA premul, cached per page).
-    const auto it = m_renderedPages.constFind(pageIndex);
-    if (it != m_renderedPages.constEnd() && !it->isNull()) {
-        const QImage& img = it.value();
-        const SkImageInfo info = SkImageInfo::Make(
-            img.width(), img.height(), kBGRA_8888_SkColorType,
-            kPremul_SkAlphaType);
-        SkPixmap pm(info, img.constBits(), img.bytesPerLine());
-        sk_sp<SkImage> sk = SkImages::RasterFromPixmapCopy(pm);
-        qDebug().noquote() << "[PROBE] drawPageOnCanvas img" << pageIndex
-                           << "size=" << img.width() << "x" << img.height()
-                           << "sk=" << (sk != nullptr);
-        if (sk) {
-            SkPaint paint;
-            paint.setAntiAlias(false);
-            const SkRect dst = SkRect::MakeXYWH(widgetRect.x(), widgetRect.y(),
-                                                widgetRect.width(), widgetRect.height());
-            canvas->drawImageRect(sk, dst,
-                                  SkSamplingOptions(SkFilterMode::kLinear,
-                                                    SkMipmapMode::kLinear),
-                                  &paint);
+                                       widgetRect.width(), widgetRect.height()),
+                      shadow);
+    
+    // Direct render to canvas via PDFium extension.
+    if (m_document && pageIndex >= 0 && pageIndex < m_pageCount) {
+        IPdfDocument* doc = m_document->interface();
+        IPdfPage* page = doc ? doc->GetPage(pageIndex) : nullptr;
+        if (page) {
+            canvas->save();
+            canvas->translate(widgetRect.x(), widgetRect.y());
+            bool success = page->RenderToCanvas(canvas, widgetRect.width(),
+                                               widgetRect.height(), m_rotation,
+                                               PDF_RENDER_ANNOTATIONS);
+            canvas->restore();
+            if (!success) {
+                qDebug().noquote() << "[PROBE] RenderToCanvas FAILED page=" << pageIndex;
+                drawCenteredString(canvas, QStringLiteral("Render Error"),
+                                   widgetRect, 14, 0xFFFF0000);
+            }
+            page->Release();
+        } else {
+            drawCenteredString(canvas, QStringLiteral("Page Not Found"),
+                               widgetRect, 14, 0xFFFFFFFF);
         }
     } else {
-        qDebug().noquote() << "[PROBE] drawPageOnCanvas PLACEHOLDER" << pageIndex;
-        drawCenteredString(canvas, QStringLiteral("Rendering page..."),
+        drawCenteredString(canvas, QStringLiteral("Invalid Page"),
                            widgetRect, 14, 0xFFFFFFFF);
     }
-
+    
     // Page border.
     SkPaint border;
     border.setStyle(SkPaint::kStroke_Style);
     border.setStrokeWidth(1);
     border.setColor(0xFFB0B0B0);
     canvas->drawRect(SkRect::MakeXYWH(widgetRect.x(), widgetRect.y(),
-                                      widgetRect.width(), widgetRect.height()),
-                     border);
+                                       widgetRect.width(), widgetRect.height()),
+                      border);
 }
+
 
 void SkiaPdfViewerWidget::drawSearchHighlights(SkCanvas* canvas, int pageIndex,
                                                const QRectF& /*pageWidgetRect*/) {
@@ -1256,20 +1211,6 @@ void SkiaPdfViewerWidget::drawSelection(SkCanvas* canvas, int pageIndex) {
     }
 }
 
-void SkiaPdfViewerWidget::onRenderFinished(int pageIndex, QImage image,
-                                           bool success) {
-    m_pendingPages.remove(pageIndex);
-    if (!success || image.isNull()) {
-        if (pageIndex == m_currentPage)
-            emit statusMessage("Failed to render page");
-        return;
-    }
-    if (m_renderedPages.size() >= kRenderCacheLimit) {
-        m_renderedPages.erase(m_renderedPages.begin());
-    }
-    m_renderedPages.insert(pageIndex, image);
-    update();
-}
 
 void SkiaPdfViewerWidget::probeDumpCanvas(SkCanvas* canvas) {
 #if !defined(NDEBUG) || defined(_DEBUG) || defined(DEBUG)
@@ -1293,8 +1234,7 @@ void SkiaPdfViewerWidget::probeDumpCanvas(SkCanvas* canvas) {
     const QString path = QString("/tmp/drawview_frame%1.png").arg(m_probeFrame);
     dump.save(path);
     qDebug().noquote() << "[PROBE] drawview saved" << path
-                       << "size=" << dump.size()
-                       << "cache=" << m_renderedPages.keys();
+                       << "size=" << dump.size();
 #endif
 }
 

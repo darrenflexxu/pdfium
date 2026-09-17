@@ -53,6 +53,17 @@ if(PDFIUM_ENABLE_SKIA)
         message(FATAL_ERROR "PDFIUM_ENABLE_SKIA=ON requires Skia headers at ${_skia_include}")
     endif()
 
+    # The app must link the same Skia configuration as the embedded PDFium.
+    # build_pdfium.py packs PDFium's own objects into libskia.a (release) and
+    # libskia_debug.a (debug); pick per build configuration when available.
+    if(EXISTS "${SKIA_DIR}/lib/libskia_debug.a")
+        set(_skia_lib
+            "$<$<CONFIG:Debug>:${SKIA_DIR}/lib/libskia_debug.a>"
+            "$<$<NOT:$<CONFIG:Debug>>:${SKIA_DIR}/lib/libskia.a>")
+    else()
+        set(_skia_lib "${SKIA_DIR}/lib/libskia.a")
+    endif()
+
     # -I<SKIA_DIR> lets the sources use Skia's canonical "include/..." paths.
     target_include_directories(pdf_reader PRIVATE
         ${SKIA_DIR}
@@ -67,7 +78,7 @@ if(PDFIUM_ENABLE_SKIA)
 
     if(APPLE)
         target_link_libraries(pdf_reader PRIVATE
-            ${SKIA_DIR}/lib/libskia.a
+            ${_skia_lib}
             "-framework OpenGL"
             "-framework QuartzCore"
             "-framework CoreFoundation"
@@ -81,16 +92,16 @@ if(PDFIUM_ENABLE_SKIA)
         target_link_libraries(pdf_reader PRIVATE
             EGL
             GLESv2
-            ${SKIA_DIR}/lib/libskia.a
+            ${_skia_lib}
         )
     elseif(IOS)
         target_link_libraries(pdf_reader PRIVATE
-            ${SKIA_DIR}/lib/libskia.a
+            ${_skia_lib}
             "-framework Metal"
             "-framework QuartzCore"
         )
     else()
-        target_link_libraries(pdf_reader PRIVATE ${SKIA_DIR}/lib/libskia.a)
+        target_link_libraries(pdf_reader PRIVATE ${_skia_lib})
     endif()
 
     unset(_skia_include)
@@ -129,7 +140,7 @@ if(PDFIUM_ENABLE_SKIA AND NOT IOS AND NOT ANDROID)
         Qt6::Gui
         Qt6::Concurrent
         pdfium_wrapper
-        ${SKIA_DIR}/lib/libskia.a
+        ${_skia_lib}
     )
     if(APPLE)
         target_link_libraries(skia_gl_harness PRIVATE
@@ -180,7 +191,7 @@ if(PDFIUM_ENABLE_SKIA AND NOT IOS AND NOT ANDROID)
         Qt6::OpenGL
         Qt6::OpenGLWidgets
         pdfium_wrapper
-        ${SKIA_DIR}/lib/libskia.a
+        ${_skia_lib}
     )
     if(APPLE)
         target_link_libraries(gpu_probe PRIVATE

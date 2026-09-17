@@ -10,6 +10,7 @@ project(pdfium_extensions LANGUAGES CXX)
 add_library(pdfium_extensions STATIC
     core/fpdf_ext_compression.cpp
     core/fpdf_ext_element.cpp
+    core/fpdf_ext_skia.cpp
     public/fpdf_ext_compression.h
     public/fpdf_ext_element.h
 )
@@ -20,6 +21,13 @@ set_target_properties(pdfium_extensions PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
 )
+
+# The direct-to-canvas extension (fpdf_ext_skia.cpp) is only usable when the
+# linked PDFium was built with Skia; PDFium guards those internals behind
+# PDF_USE_SKIA, so mirror the project option here.
+if(PDFIUM_ENABLE_SKIA)
+    target_compile_definitions(pdfium_extensions PRIVATE PDF_USE_SKIA=1)
+endif()
 
 # PDFium internal include paths (mapped from current source tree layout)
 target_include_directories(pdfium_extensions
@@ -36,6 +44,8 @@ target_include_directories(pdfium_extensions
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/pdfium/third_party/freetype/src/include>
         # SDK headers
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/include>
+        # Skia (for direct-to-canvas rendering extension)
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/pdfium/pdfium/third_party/skia>
 )
 
 # Link against the PDFium core implementation

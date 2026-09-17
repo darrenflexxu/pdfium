@@ -77,7 +77,6 @@ public:
     qreal zoom() const override { return m_zoom; }
     int rotation() const override { return m_rotation; }
 
-    // Re-render the visible page(s) asynchronously and repaint.
     void renderCurrentPage() override;
 
     // Coordinate mapping (PDF page space <-> widget pixels, rotation-aware).
@@ -109,10 +108,6 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
-    void requestRender(int pageIndex);
-    void waitForPendingRenders();
-    void clearRenderCache();
-    void onRenderFinished(int pageIndex, QImage image, bool success);
     void onLoadFinished(bool success, const QString& error);
     void clearTextSelectionState();
     QString selectedText() const;
@@ -175,11 +170,6 @@ private:
     int m_clickCount = 1;
     QPointF m_lastClickPagePos;
     int m_lastClickIndex = -1;
-
-    // Raster cache of PDFium-rendered pages (the GPU texture source per frame).
-    QMap<int, QImage> m_renderedPages;
-    QSet<int> m_pendingPages;
-    QList<QFuture<void>> m_renderFutures;
 
 #ifdef SKIA_AVAILABLE
     int m_probeFrame = 0; // [PROBE] temp

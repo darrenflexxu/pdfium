@@ -53,3 +53,58 @@
 | **指令一致性** | 操作工具栏（缩放/翻页/旋转） | 所有的视图操作通过基类接口正确分发，无论在哪个 Viewer 下均正常 |
 | **动态回退** | 切换到“禁用 GPU 加速” | 视图平滑切换至 `PdfViewerWidget`，维持原有的 CPU 渲染效果，状态同步正确 |
 | **压力测试** | 快速连续滚动 100 页 | 界面无卡顿，内存占用稳定，无渲染闪烁 |
+
+## 12. 详细实现计划：pdfreader 将 Qt 中的 SkCanvas 传入到 PDFium 中，直接在 SkCanvas 上渲染正文元素
+
+### 1. 需求背景
+目前的 GPU 渲染路径为：`PDFium (内部 Skia) -> 栅格化为位图 (QImage) -> 上传到 GPU 纹理 -> 使用 Skia 绘制纹理到屏幕`。
+该路径存在两次冗余：一是 PDFium 内部已使用 Skia，但最终输出的是像素阵列；二是前端再次使用 Skia 将像素阵列绘制到屏幕。
+目标是实现真正的“直通”渲染：`PDFium (内部 Skia) -> 直接在 Qt 提供的 SkCanvas 上执行绘制指令 -> 屏幕`。
+
+### 2. 涉及修改的文件列表
+
+#### PDFium 扩展层
+- `pdfium_extensions/core/fpdf_ext_skia.h` (新): 定义 `FPDF_RenderPageToCanvas` 接口。
+- `pdfium_extensions/core/fpdf_ext_skia.cpp` (新): 实现调用 PDFium 内部 `CPDF_PageRenderContext` 的逻辑。
+
+#### 包装层 (pdfium_wrapper)
+- `pdfium_wrapper/include/pdfium_wrapper.h`: 在 `IPdfPage` 接口中增加 `RenderToCanvas` 虚函数。
+- `pdfium_wrapper/src/pdfium_wrapper_impl.cpp`: 实现 `IPdfPage::RenderToCanvas`，调用上述扩展接口。
+
+#### Qt 应用层 (qt_app)
+- `qt_app/src/skiapdfviewerwidget.cpp`: 修改 `drawPageOnCanvas` 函数，由绘制缓存位图改为直接调用 `RenderToCanvas`。
+
+### 3. 具体执行步骤
+
+#### 步骤 1: 实现 PDFium 内部直接渲染扩展
+**目标**: 在 PDFium 内部创建一个能够接受 `SkCanvas*` 并执行页面渲染的 C-API。
+- **实现内容**: 
+    1. 参考 `fx_skia_device_embeddertest.cpp` 中的 `RenderPageToSkCanvas` 实现。
+    2. 创建 `CPDF_PageRenderContext`。
+    3. 使用 `CFX_RenderDevice::CreateForSkiaCanvas(canvas)` 创建渲染设备。
+    4. 调用 `CPDFSDK_RenderPageWithContext` 执行渲染。
+- **校验方式**: 编写简单的单元测试或使用 `skia_gl_harness` 验证 `FPDF_RenderPageToCanvas` 能正确在 Canvas 上产生绘制指令。
+
+#### 步骤 2: 扩展 Wrapper 接口
+**目标**: 将底层 Skia 渲染能力暴露给 Qt 应用。
+- **实现内容**:
+    1. 在 `IPdfPage` 中定义 `virtual bool RenderToCanvas(SkCanvas* canvas, int width, int height, int rotation, int flags) = 0;`。
+    2. 在 `PdfPageImpl` 中实现该函数，负责将参数传递给 `FPDF_RenderPageToCanvas`。
+- **校验方式**: 编译 `pdfium_wrapper` 确保无错误。
+
+#### 步骤 3: 重构 `SkiaPdfViewerWidget` 的绘制链路
+**目标**: 消除位图缓存，实现直接绘制。
+- **实现内容**:
+    1. 修改 `drawPageOnCanvas`：删除 `m_renderedPages` 缓存查询逻辑 $\rightarrow$ 直接调用 `m_document->getPage(pageIndex)->RenderToCanvas(canvas, ...)`。
+    2. **优化缓存逻辑**: 由于不再需要异步渲染位图，可以移除 `requestRender` 异步循环、`m_pendingPages` 集合以及 `m_renderFutures` 管理逻辑。
+    3. **坐标同步**: 确保传递给 `RenderToCanvas` 的 `width` 和 `height` 与 `widgetRect` 完全一致。
+- **校验方式**: 运行应用 $\rightarrow$ 观察页面显示 $\rightarrow$ 确认不再有 "Rendering page..." 的占位符，页面瞬间加载。
+
+#### 步骤 4: 性能与质量终验
+**目标**: 验证全链路 Skia 渲染的优势。
+- **实现内容**:
+    1. 对比 `PdfViewerWidget` (CPU) 和 `SkiaPdfViewerWidget` (Direct GPU) 的文字边缘锐利度和路径平滑度。
+    2. 测试快速缩放（Zoom）时的响应速度，验证是否消除了位图更新的闪烁感。
+- **校验方式**: 
+    - 视觉确认：文字抗锯齿效果达到 Chrome 级别。
+    - 帧率确认：滚动时维持稳定 60FPS。

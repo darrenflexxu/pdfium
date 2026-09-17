@@ -328,6 +328,53 @@ class PDFiumBuilder:
                     
         return True
 
+    def pack_skia_for_app(self) -> bool:
+        """Repackage PDFium's freshly built Skia objects into a standalone
+        static archive for the Qt app.
+
+        The app must link the *same* Skia (same commit AND same debug/release
+        config) that is embedded in libpdfium.a; otherwise Skia objects cross
+        the PDFium/app boundary with a mismatched ABI (e.g. the SkTextBlob
+        RunRecord magic differs when SK_DEBUG is set) and crash. Objects are
+        collected from PDFium's own GN output and bundled with libtool/ar."""
+        if not self.config.use_skia:
+            return True
+
+        log_step("Packaging Skia objects for the Qt app...")
+
+        obj_root = self.build_dir / "obj" / "skia"
+        if not obj_root.exists():
+            log_warning(f"Skia object dir not found: {obj_root}")
+            return True
+
+        objs = [
+            p for p in obj_root.rglob("*.o")
+            if not p.name.startswith("._")
+            and p.name != "GrGLMakeNativeInterface_none.o"
+        ]
+        if not objs:
+            log_warning("No Skia objects found; skipping Skia packaging")
+            return True
+
+        dst_lib_dir = self.repo_root / "third_party" / "skia_lib" / "lib"
+        dst_lib_dir.mkdir(parents=True, exist_ok=True)
+        out = dst_lib_dir / ("libskia_debug.a" if self.config.is_debug else "libskia.a")
+
+        if self.system == "darwin":
+            filelist = self.build_dir / "skia_objs.txt"
+            filelist.write_text("\n".join(str(p) for p in objs))
+            cmd = ["/usr/bin/libtool", "-static", "-o", str(out),
+                   "-filelist", str(filelist)]
+        else:
+            cmd = ["ar", "rcs", str(out)] + [str(p) for p in objs]
+
+        rc, _, err = self.run_cmd(cmd)
+        if rc != 0:
+            log_error(f"Failed to pack Skia objects: {err}")
+            return False
+        log_success(f"Packed {len(objs)} Skia objects -> {out}")
+        return True
+
     def build(self) -> bool:
         """Run complete build process"""
         log_info("=" * 60)
@@ -341,6 +388,7 @@ class PDFiumBuilder:
             ("Run GN gen", self.run_gn_gen),
             ("Run Ninja build", lambda: self.run_ninja_build("pdfium")),
             ("Extract artifacts", self.extract_artifacts),
+            ("Package Skia for app", self.pack_skia_for_app),
         ]
         
         for name, step_func in steps:

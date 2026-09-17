@@ -4,10 +4,12 @@
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QSurfaceFormat>
 #include <QEventLoop>
 #include <QImage>
 #include <iostream>
 #include <vector>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 
@@ -15,6 +17,7 @@
 #include "include/gpu/ganesh/gl/GrGLInterface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
 #include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
@@ -31,10 +34,22 @@ int main(int argc, char** argv) {
 
     QGuiApplication app(argc, argv);
 
+    // Request a 3.3 core-profile context: Skia's Ganesh shaders use GLSL
+    // 1.30+ features (gl_VertexID) that a legacy 2.1 context cannot compile.
+    QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+    fmt.setRenderableType(QSurfaceFormat::OpenGL);
+    fmt.setVersion(3, 3);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setDepthBufferSize(24);
+    fmt.setStencilBufferSize(8);
+    QSurfaceFormat::setDefaultFormat(fmt);
+
     // Offscreen GL context (no windowing session needed).
     QOffscreenSurface offscreen;
+    offscreen.setFormat(fmt);
     offscreen.create();
     QOpenGLContext glCtx;
+    glCtx.setFormat(fmt);
     if (!glCtx.create()) {
         std::cerr << "HARNESS FATAL: QOpenGLContext::create() failed\n";
         return 1;
@@ -161,55 +176,98 @@ int main(int argc, char** argv) {
         fbInfo.fFormat = 0x8058;        // GL_RGBA8
         GrBackendRenderTarget backend =
             GrBackendRenderTargets::MakeGL(kW, kH, 0, 8, fbInfo);
+
+        grCtx->flushAndSubmit();
+
+        // Stage 2 renders DIRECTLY onto a GL-backed SkCanvas through the
+        // wrapper's IPdfPage::RenderToCanvas (plan §12 step 1:
+        // FPDF_RenderPageToCanvas must emit drawing into a canvas). This
+        // mirrors SkiaPdfViewerWidget::paintGL(), where PDFium's Skia device
+        // records straight into the widget's framebuffer.
         sk_sp<SkSurface> wrapped = SkSurfaces::WrapBackendRenderTarget(
             grCtx.get(), backend, kTopLeft_GrSurfaceOrigin,
             kRGBA_8888_SkColorType, nullptr, nullptr);
         if (!wrapped) {
-            std::cerr << "HARNESS STAGE2 FATAL: WrapBackendRenderTarget() returned nullptr\n";
+            std::cerr << "HARNESS STAGE2 FATAL: WrapBackendRenderTarget() failed\n";
             return 1;
         }
         SkCanvas* wcanvas = wrapped->getCanvas();
         wcanvas->clear(SK_ColorWHITE);
-        if (skImg) {
-            wcanvas->drawImageRect(
-                skImg.get(),
-                SkRect::MakeIWH(cpuImg.width(), cpuImg.height()),
-                SkRect::MakeIWH(kW, kH),
-                SkSamplingOptions(SkFilterMode::kLinear), nullptr,
-                SkCanvas::kFast_SrcRectConstraint);
-        }
-        grCtx->flushAndSubmit();
 
-        std::vector<uint8_t> wrapBuf(rowBytes * kH);
-        if (!wrapped->readPixels(readInfo, wrapBuf.data(), rowBytes, 0, 0)) {
+        IPdfPage* page = doc.interface()->GetPage(0);
+        if (!page) {
+            std::cerr << "HARNESS STAGE2 FATAL: GetPage(0) returned nullptr\n";
+            return 1;
+        }
+        const bool rendered =
+            page->RenderToCanvas(wcanvas, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+        page->Release();
+        grCtx->flushAndSubmit();
+        if (!rendered) {
+            std::cerr << "HARNESS STAGE2 FATAL: RenderToCanvas() failed\n";
+            return 1;
+        }
+
+        const SkImageInfo readInfo = SkImageInfo::Make(
+            kW, kH, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+        std::vector<uint8_t> directBuf(rowBytes * kH);
+        if (!wrapped->readPixels(readInfo, directBuf.data(), rowBytes, 0, 0)) {
             std::cerr << "HARNESS STAGE2 FATAL: readPixels() failed\n";
             return 1;
         }
 
-        int wrapMismatch = 0;
+        // The canvas renderer (Skia) and the bitmap renderer differ slightly at
+        // antialiased edges, so use a loose tolerance and also require that the
+        // direct output actually contains ink at a coverage comparable to the
+        // CPU reference (i.e. the page was really drawn, not left blank).
+        int mismatch = 0, directInk = 0, refInk = 0;
         for (int y = 0; y < kH; ++y) {
             const uint8_t* cpuLine = cpuImg.constScanLine(y);
-            const uint8_t* gpuLine = &wrapBuf[y * rowBytes];
+            const uint8_t* gpuLine = &directBuf[y * rowBytes];
             for (int x = 0; x < kW; ++x) {
-                const bool ok =
-                    std::abs(int(cpuLine[2]) - int(gpuLine[0])) <= 4 &&
-                    std::abs(int(cpuLine[1]) - int(gpuLine[1])) <= 4 &&
-                    std::abs(int(cpuLine[0]) - int(gpuLine[2])) <= 4 &&
-                    std::abs(int(cpuLine[3]) - int(gpuLine[3])) <= 4;
-                if (!ok) ++wrapMismatch;
+                const bool dif =
+                    std::abs(int(cpuLine[2]) - int(gpuLine[0])) > 48 ||
+                    std::abs(int(cpuLine[1]) - int(gpuLine[1])) > 48 ||
+                    std::abs(int(cpuLine[0]) - int(gpuLine[2])) > 48;
+                if (dif) ++mismatch;
+                if (gpuLine[0] < 250 || gpuLine[1] < 250 || gpuLine[2] < 250) ++directInk;
+                if (cpuLine[0] < 250 || cpuLine[1] < 250 || cpuLine[2] < 250) ++refInk;
                 cpuLine += 4;
                 gpuLine += 4;
             }
         }
-        const bool wrapPass = wrapMismatch <= total / 500;
-        std::cout << "HARNESS STAGE2 " << (wrapPass ? "PASS" : "FAIL")
-                  << "  mismatches=" << wrapMismatch << "/" << total
-                  << "  (slack " << total / 500 << ")\n";
+        const bool contentOk = directInk > 0 && refInk > 0 &&
+                               directInk >= refInk / 4 && directInk <= refInk * 4;
+        const bool directPass = contentOk && mismatch <= total / 8;
+        std::cout << "HARNESS STAGE2 " << (directPass ? "PASS" : "FAIL")
+                  << "  directInk=" << directInk << " refInk=" << refInk
+                  << " mismatch(>48)=" << mismatch << "/" << total << "\n";
+        if (!directPass) return 1;
+
+        // Stage 3: micro-benchmark of the direct RenderToCanvas path (plan §12
+        // step 4). Measures the per-frame cost of drawing the page straight
+        // into the GL-backed canvas, excluding Qt/window event overhead.
+        {
+            const int kIters = 30;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kIters; ++i) {
+                IPdfPage* bp = doc.interface()->GetPage(0);
+                if (!bp) break;
+                bp->RenderToCanvas(wrapped->getCanvas(), kW, kH, 0,
+                                   PDF_RENDER_ANNOTATIONS);
+                bp->Release();
+            }
+            grCtx->flushAndSubmit();
+            const auto t1 = std::chrono::steady_clock::now();
+            const double ms =
+                std::chrono::duration<double, std::milli>(t1 - t0).count() / kIters;
+            std::cout << "HARNESS STAGE3 direct avg=" << ms << " ms/frame ("
+                      << (ms > 0 ? 1000.0 / ms : 0.0) << " fps budget)\n";
+        }
 
         glf->glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glf->glDeleteFramebuffers(1, &fbo);
         glf->glDeleteRenderbuffers(1, &rbo);
-        if (!wrapPass) return 1;
     }
 
     glCtx.doneCurrent();

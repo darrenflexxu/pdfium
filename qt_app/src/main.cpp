@@ -5,9 +5,20 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QDebug>
+#include <QSurfaceFormat>
 #include <QTimer> // [PROBE] temp
 
 int main(int argc, char* argv[]) {
+    // Skia's Ganesh GL backend needs GLSL 1.30+ (gl_VertexID); request a core
+    // profile before any OpenGL context is created (default is 2.1 on macOS).
+    QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+    fmt.setRenderableType(QSurfaceFormat::OpenGL);
+    fmt.setVersion(3, 3);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setDepthBufferSize(24);
+    fmt.setStencilBufferSize(8);
+    QSurfaceFormat::setDefaultFormat(fmt);
+
     QApplication app(argc, argv);
     app.setApplicationName("PDF Reader");
     app.setApplicationVersion("1.0.0");
