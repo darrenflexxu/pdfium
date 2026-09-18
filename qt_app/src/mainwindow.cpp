@@ -798,14 +798,15 @@ void MainWindow::toggleGpuAcceleration(bool checked) {
     const bool srcSelection = m_selectionToolAction ? m_selectionToolAction->isChecked() : false;
     PdfDocument* doc = m_viewer->document();
 
-    // [PROBE] temp: log the new GPU surface geometry after the swap.
-    qDebug().noquote() << "[PROBE] toggleGpuAcceleration checked=" << checked
-                       << "srcPage=" << srcPage << "srcZoom=" << srcZoom;
+    // Preserve bookmark dock geometry/state to avoid it expanding during swap.
+    const bool dockVisible = m_bookmarksDock ? m_bookmarksDock->isVisible() : false;
+    const QByteArray dockState = m_bookmarksDock ? saveState() : QByteArray();
 
-    // Tear down the old viewer and build the new backend.
+    // Capture the old widget's geometry to restore on the new one.
     QWidget* oldWidget = m_viewer->widget();
-    setCentralWidget(nullptr);
+    const QSize oldSize = oldWidget ? oldWidget->size() : QSize();
 
+    // Create the new viewer backend before removing the old one.
     m_viewer = createViewer(checked);
     AbstractPdfViewer* next = m_viewer;
     next->setDocument(doc);
@@ -820,11 +821,25 @@ void MainWindow::toggleGpuAcceleration(bool checked) {
     next->setTextSelectionEnabled(srcSelection);
 
     setupViewerConnections(next);
-    setCentralWidget(next->widget());
-    next->widget()->show();
 
+    // Swap the central widget directly (no nullptr intermediate) to keep
+    // the dock layout stable.
+    QWidget* nextWidget = next->widget();
+    if (oldWidget) {
+        // Ensure the new widget has the same size as the old one immediately,
+        // avoiding a blurry first frame caused by transient layout.
+        nextWidget->resize(oldSize);
+    }
+    setCentralWidget(nextWidget);
+    nextWidget->show();
     if (oldWidget)
         oldWidget->deleteLater();
+
+    // Restore bookmark dock geometry/visibility.
+    if (m_bookmarksDock && !dockState.isEmpty())
+        restoreState(dockState);
+    else if (m_bookmarksDock && dockVisible)
+        m_bookmarksDock->show();
 
     if (m_viewModeCombo) {
         if (m_viewModeCombo->currentIndex() != srcMode)
