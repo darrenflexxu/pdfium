@@ -397,6 +397,23 @@ int main(int argc, char** argv) {
         }
         gpu->setZoom(1.0);
         pumpFor(200);
+
+        // Rotation sweep through the real widget path (including the y-flip
+        // presentation transform in paintGL): the page rect must swap for
+        // 90/270 AND the dark-text bbox must move with the rotation.
+        gpu->setViewMode(AbstractPdfViewer::ViewMode::SinglePage);
+        for (int r : {0, 90, 180, 270}) {
+            gpu->setRotation(r);
+            pumpFor(400);
+            QImage rfb = gpu->grabFramebuffer();
+            qDebug().noquote() << "[PROBE] ROT" << r
+                               << "pageRect=" << gpu->pageRect().toRect()
+                               << "zoom=" << gpu->zoom();
+            reportInkRows(QStringLiteral("ROT%1").arg(r), rfb);
+            reportColorBBox(QStringLiteral("ROT%1").arg(r), rfb);
+        }
+        gpu->setRotation(0);
+        pumpFor(200);
     }
 
     qDebug().noquote() << "[PROBE] done";

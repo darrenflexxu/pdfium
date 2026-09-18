@@ -27,11 +27,12 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: skia_gl_harness <pdf_path> [width height]\n";
+        std::cerr << "usage: skia_gl_harness <pdf_path> [width height rotation]\n";
         return 1;
     }
     const int kW = argc > 2 ? std::atoi(argv[2]) : 300;
     const int kH = argc > 3 ? std::atoi(argv[3]) : 200;
+    const int kRot = argc > 4 ? std::atoi(argv[4]) : 0;
 
     QGuiApplication app(argc, argv);
 
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
     QEventLoop loop;
     QObject::connect(&doc, &PdfDocument::renderFinished,
                      [&](int, QImage img, bool ok) { if (ok) cpuImg = img; loop.quit(); });
-    doc.requestRender(0, QSize(kW, kH), 0);
+    doc.requestRender(0, QSize(kW, kH), kRot);
     loop.exec();
     if (cpuImg.isNull()) {
         std::cerr << "HARNESS FATAL: CPU render failed\n";
@@ -201,7 +202,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         const bool rendered =
-            page->RenderToCanvas(wcanvas, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+            page->RenderToCanvas(wcanvas, 0, 0, kW, kH, kRot, PDF_RENDER_ANNOTATIONS);
         page->Release();
         grCtx->flushAndSubmit();
         if (!rendered) {
@@ -307,7 +308,7 @@ int main(int argc, char** argv) {
             c->clear(SkColorSetARGB(255, 128, 128, 128));
             IPdfPage* fp = doc.interface()->GetPage(0);
             if (fp) {
-                fp->RenderToCanvas(c, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+                fp->RenderToCanvas(c, 0, 0, kW, kH, kRot, PDF_RENDER_ANNOTATIONS);
                 fp->Release();
             }
             grCtx->flushAndSubmit();
@@ -341,7 +342,7 @@ int main(int argc, char** argv) {
             c->scale(1, -1);
             IPdfPage* fp = doc.interface()->GetPage(0);
             if (fp) {
-                fp->RenderToCanvas(c, 0, 0, kW, kH, 0, PDF_RENDER_ANNOTATIONS);
+                fp->RenderToCanvas(c, 0, 0, kW, kH, kRot, PDF_RENDER_ANNOTATIONS);
                 fp->Release();
             }
             c->restore();
@@ -389,7 +390,7 @@ int main(int argc, char** argv) {
                     if (ok) cpuZoom = img;
                     zloop.quit();
                 });
-            doc.requestRender(0, QSize(zW, zH), 0);
+            doc.requestRender(0, QSize(zW, zH), kRot);
             zloop.exec();
             QObject::disconnect(zc);
             if (cpuZoom.isNull()) {
@@ -426,7 +427,7 @@ int main(int argc, char** argv) {
             SkCanvas* c = wrapped->getCanvas();
             c->clear(SK_ColorWHITE);
             IPdfPage* wp = doc.interface()->GetPage(0);
-            bool ok = wp && wp->RenderToCanvas(c, offX, offY, zW, zH, 0,
+            bool ok = wp && wp->RenderToCanvas(c, offX, offY, zW, zH, kRot,
                                                PDF_RENDER_ANNOTATIONS);
             if (wp) wp->Release();
             grCtx->flushAndSubmit();
@@ -482,7 +483,7 @@ int main(int argc, char** argv) {
                 oc->translate(offX, offY);
                 IPdfPage* op = doc.interface()->GetPage(0);
                 if (op) {
-                    op->RenderToCanvas(oc, 0, 0, zW, zH, 0,
+                    op->RenderToCanvas(oc, 0, 0, zW, zH, kRot,
                                        PDF_RENDER_ANNOTATIONS);
                     op->Release();
                 }
@@ -520,7 +521,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < kIters; ++i) {
                 IPdfPage* bp = doc.interface()->GetPage(0);
                 if (!bp) break;
-                bp->RenderToCanvas(wrapped->getCanvas(), 0, 0, kW, kH, 0,
+                bp->RenderToCanvas(wrapped->getCanvas(), 0, 0, kW, kH, kRot,
                                    PDF_RENDER_ANNOTATIONS);
                 bp->Release();
             }

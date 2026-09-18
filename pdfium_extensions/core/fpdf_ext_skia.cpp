@@ -33,10 +33,17 @@ bool FPDF_RenderPageToCanvas(FPDF_PAGE page,
     if (!default_device) return false;
     unowned_context->device_ = std::move(default_device);
 
+    // This extension's public API takes rotation in DEGREES (0/90/180/270),
+    // matching how the widget stores it. CPDFSDK_RenderPageWithContext (like
+    // FPDF_RenderPageBitmap) expects QUARTER-TURNS (0..3); GetDisplayMatrixForRect
+    // does `rotation % 4` on it, so passing raw degrees would map 90 and 270 to
+    // 180 and leave 180 unrotated. Normalize before handing off.
+    const int pdfium_rotation = ((rotation / 90) % 4 + 4) % 4;
+
     // Execute the rendering.
     // CPDFSDK_RenderPageWithContext is the internal entry point for rendering a page.
     CPDFSDK_RenderPageWithContext(unowned_context, cpdf_page, start_x, start_y,
-                                  size_x, size_y, rotation, flags,
+                                  size_x, size_y, pdfium_rotation, flags,
                                   /*color_scheme=*/nullptr,
                                   /*need_to_restore=*/true, /*pause=*/nullptr);
 
